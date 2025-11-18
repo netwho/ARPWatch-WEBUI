@@ -11,7 +11,7 @@ A modern, containerized web interface for monitoring Arpwatch network activity. 
 ## 📸 Screenshots
 
 <!-- Add screenshots here when available -->
-Example: ![Dashboard](screenshots/sample.png)
+Example: ![Dashboard](screenshot/sample.png)
 
 ## 🚀 Features
 
