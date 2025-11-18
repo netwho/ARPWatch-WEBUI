@@ -1,0 +1,30 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: arpwatch-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - /var/lib/arpwatch:/var/lib/arpwatch:ro
+      - /var/log/arpwatch:/var/log/arpwatch:ro
+    environment:
+      - ARPWATCH_DATA_DIR=/var/lib/arpwatch
+      - ARPWATCH_LOG_DIR=/var/log/arpwatch
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: arpwatch-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+# Note: Arpwatch runs natively on the host
+# Data files are mounted from /var/lib/arpwatch and /var/log/arpwatch
+
