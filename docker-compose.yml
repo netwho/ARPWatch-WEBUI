@@ -7,11 +7,19 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - /var/lib/arpwatch:/var/lib/arpwatch:ro
+      - /var/lib/arpwatch:/var/lib/arpwatch:rw  # Changed to rw for OS cache file
       - /var/log/arpwatch:/var/log/arpwatch:ro
     environment:
       - ARPWATCH_DATA_DIR=/var/lib/arpwatch
       - ARPWATCH_LOG_DIR=/var/log/arpwatch
+      - ENABLE_OS_FINGERPRINTING=true
+      - ENABLE_PORT_SCANNING=true
+      - SCAN_PORTS=21,22,80,443,445
+      # EXCLUDE_IP_RANGES: Comma-separated CIDR ranges to exclude (e.g., "192.168.2.0/24" for VPN)
+      # - EXCLUDE_IP_RANGES=192.168.2.0/24
+    cap_add:
+      - NET_RAW  # Required for nmap OS detection
+      - NET_ADMIN  # May be needed for some nmap operations
     restart: unless-stopped
 
   frontend:

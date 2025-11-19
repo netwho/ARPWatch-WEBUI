@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2025-11-18
+
+### Changed
+- OS fingerprinting now shows "Unknown" instead of "Scanning..." when detection fails
+- OS fingerprinting automatically retries once per day for entries marked as "Unknown"
+- Improved caching logic to track scan attempts and timestamps
+
+## [0.2.0] - 2025-11-18
+
+### Added
+- Port scanning feature with configurable ports (default: 21, 22, 80, 443, 445)
+- Configuration options in docker-compose.yml to enable/disable features:
+  - `ENABLE_OS_FINGERPRINTING` - Enable/disable OS fingerprinting (default: true)
+  - `ENABLE_PORT_SCANNING` - Enable/disable port scanning (default: true)
+  - `SCAN_PORTS` - Comma-separated list of ports to scan (default: "21,22,80,443,445")
+- API endpoint `/api/config` to retrieve current configuration
+- Vertical bar chart for OS distribution
+- Horizontal layout for statistics cards
+
+### Changed
+- Statistics cards now display horizontally in a row
+- OS distribution chart changed to vertical bar chart
+- Improved responsive design for mobile devices
+
 ## [0.1.0] - 2025-11-18
 
 ### Added

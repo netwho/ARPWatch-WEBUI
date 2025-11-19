@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts';
 import './App.css';
 
 // Use relative URLs in production (nginx proxy), absolute in development
@@ -13,6 +14,10 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState('hosts');
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [scanResults, setScanResults] = useState({});
+  const [scanning, setScanning] = useState({});
+  const [showTooltip, setShowTooltip] = useState({});
+  const [config, setConfig] = useState({ os_fingerprinting_enabled: true, port_scanning_enabled: true });
 
   useEffect(() => {
     fetchData();
@@ -24,14 +29,16 @@ function App() {
 
   const fetchData = async () => {
     try {
-      const [hostsRes, eventsRes, statsRes] = await Promise.all([
+      const [hostsRes, eventsRes, statsRes, configRes] = await Promise.all([
         axios.get(`${API_URL}/api/hosts`),
         axios.get(`${API_URL}/api/events?limit=50`),
-        axios.get(`${API_URL}/api/stats`)
+        axios.get(`${API_URL}/api/stats`),
+        axios.get(`${API_URL}/api/config`).catch(() => ({ data: { os_fingerprinting_enabled: true, port_scanning_enabled: true } }))
       ]);
       setHosts(hostsRes.data);
       setEvents(eventsRes.data);
       setStats(statsRes.data);
+      setConfig(configRes.data);
       setLoading(false);
     } catch (error) {
       console.error('Error fetching data:', error);
@@ -98,6 +105,34 @@ function App() {
     return ip;
   };
 
+  const handlePortScan = async (ip) => {
+    const formattedIp = formatIpAddress(ip);
+    setScanning(prev => ({ ...prev, [formattedIp]: true }));
+    setShowTooltip(prev => ({ ...prev, [formattedIp]: false }));
+    
+    try {
+      const response = await axios.get(`${API_URL}/api/scan/${formattedIp}`);
+      setScanResults(prev => ({ ...prev, [formattedIp]: response.data }));
+      setShowTooltip(prev => ({ ...prev, [formattedIp]: true }));
+    } catch (error) {
+      setScanResults(prev => ({ 
+        ...prev, 
+        [formattedIp]: { 
+          status: 'error', 
+          error: error.response?.data?.detail || error.message,
+          ports: []
+        } 
+      }));
+      setShowTooltip(prev => ({ ...prev, [formattedIp]: true }));
+    } finally {
+      setScanning(prev => ({ ...prev, [formattedIp]: false }));
+    }
+  };
+
+  const toggleTooltip = (ip) => {
+    setShowTooltip(prev => ({ ...prev, [ip]: !prev[ip] }));
+  };
+
   return (
     <div className="App">
       <header className="app-header">
@@ -120,23 +155,51 @@ function App() {
       </header>
 
       {stats && (
-        <div className="stats-container">
-          <div className="stat-card">
-            <div className="stat-value">{stats.total_hosts}</div>
-            <div className="stat-label">Total Hosts</div>
+        <div className="stats-section">
+          <div className="stats-container">
+            <div className="stat-card">
+              <div className="stat-value">{stats.total_hosts}</div>
+              <div className="stat-label">Total Hosts</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-value">{stats.active_hosts}</div>
+              <div className="stat-label">Active Hosts</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-value stat-new">{stats.new_hosts}</div>
+              <div className="stat-label">New Hosts</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-value stat-changed">{stats.changed_hosts}</div>
+              <div className="stat-label">Changed Hosts</div>
+            </div>
           </div>
-          <div className="stat-card">
-            <div className="stat-value">{stats.active_hosts}</div>
-            <div className="stat-label">Active Hosts</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-value stat-new">{stats.new_hosts}</div>
-            <div className="stat-label">New Hosts</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-value stat-changed">{stats.changed_hosts}</div>
-            <div className="stat-label">Changed Hosts</div>
-          </div>
+          {stats.os_distribution && Object.keys(stats.os_distribution).length > 0 && (
+            <div className="os-chart-container">
+              <div className="os-chart-card">
+                <h3>OS Distribution</h3>
+                <ResponsiveContainer width="100%" height={300}>
+                  <BarChart
+                    layout="vertical"
+                    data={Object.entries(stats.os_distribution)
+                      .map(([name, value]) => ({ name, value }))
+                      .sort((a, b) => b.value - a.value)}
+                    margin={{ top: 5, right: 30, left: 60, bottom: 5 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis type="number" />
+                    <YAxis dataKey="name" type="category" width={100} />
+                    <Tooltip />
+                    <Bar dataKey="value" fill="#667eea" radius={[0, 8, 8, 0]}>
+                      {Object.entries(stats.os_distribution).map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={['#667eea', '#764ba2', '#f093fb', '#4facfe', '#43e97b', '#fa709a'][index % 6]} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -177,13 +240,15 @@ function App() {
                       <th>IP Address</th>
                       <th>MAC Address</th>
                       <th>Hostname</th>
+                      {config.os_fingerprinting_enabled && <th>OS Fingerprint</th>}
+                      <th>Age</th>
                       <th>Status</th>
                     </tr>
                   </thead>
                   <tbody>
                     {filteredHosts.length === 0 ? (
                       <tr>
-                        <td colSpan="4" className="no-data">
+                        <td colSpan={config.os_fingerprinting_enabled ? "6" : "5"} className="no-data">
                           No hosts found
                         </td>
                       </tr>
@@ -195,10 +260,73 @@ function App() {
                           <td className="hostname-cell">
                             {host.hostname || <span className="no-hostname">—</span>}
                           </td>
-                          <td>
-                            <span className={`badge badge-${host.status}`}>
-                              {host.status}
-                            </span>
+                          {config.os_fingerprinting_enabled && (
+                            <td className="os-cell">
+                              {host.os_fingerprint || <span className="no-os">Unknown</span>}
+                            </td>
+                          )}
+                          <td className="age-cell">
+                            {host.age || <span className="no-age">—</span>}
+                          </td>
+                          <td className="status-cell">
+                            <div className="status-container">
+                              <span className={`badge badge-${host.status}`}>
+                                active
+                              </span>
+                              {config.port_scanning_enabled && (
+                                <button
+                                  className="btn-scan"
+                                  onClick={() => handlePortScan(host.ip_address)}
+                                  disabled={scanning[formatIpAddress(host.ip_address)]}
+                                  title={`Scan ports (${config.scan_ports ? config.scan_ports.join(', ') : '21, 22, 80, 443, 445'})`}
+                                >
+                                  {scanning[formatIpAddress(host.ip_address)] ? '⏳' : '🔍'}
+                                </button>
+                              )}
+                              {showTooltip[formatIpAddress(host.ip_address)] && scanResults[formatIpAddress(host.ip_address)] && (
+                                <div className="scan-tooltip">
+                                  <div className="tooltip-header">
+                                    <span>Port Scan Results - {formatIpAddress(host.ip_address)}</span>
+                                    <button className="tooltip-close" onClick={() => toggleTooltip(formatIpAddress(host.ip_address))}>×</button>
+                                  </div>
+                                  <div className="tooltip-content">
+                                    {scanResults[formatIpAddress(host.ip_address)].status === 'success' ? (
+                                      scanResults[formatIpAddress(host.ip_address)].ports.length > 0 ? (
+                                        <table className="port-table">
+                                          <thead>
+                                            <tr>
+                                              <th>Port</th>
+                                              <th>State</th>
+                                              <th>Service</th>
+                                              <th>Version</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody>
+                                            {scanResults[formatIpAddress(host.ip_address)].ports.map((port, idx) => (
+                                              <tr key={idx}>
+                                                <td className="port-number">{port.port}</td>
+                                                <td className={`port-state port-${port.state}`}>{port.state}</td>
+                                                <td className="port-service">{port.service}</td>
+                                                <td className="port-version">{port.version || '—'}</td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      ) : (
+                                        <div className="no-ports">No open ports found</div>
+                                      )
+                                    ) : (
+                                      <div className="scan-error">
+                                        Error: {scanResults[formatIpAddress(host.ip_address)].error || 'Unknown error'}
+                                      </div>
+                                    )}
+                                    <div className="tooltip-footer">
+                                      Scanned at: {new Date(scanResults[formatIpAddress(host.ip_address)].scan_time).toLocaleString()}
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))
@@ -251,7 +379,7 @@ function App() {
       </div>
 
       <footer className="app-footer">
-        <p>Arpwatch Web UI v0.1.0 | Network Monitoring Dashboard</p>
+        <p>Arpwatch Web UI v0.2.1 | Network Monitoring Dashboard</p>
       </footer>
     </div>
   );

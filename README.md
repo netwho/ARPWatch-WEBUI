@@ -1,7 +1,7 @@
 # Arpwatch Web UI
 
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](VERSION)
+[![Version](https://img.shields.io/badge/version-0.2.1-blue.svg)](VERSION)
 [![Docker](https://img.shields.io/badge/Docker-20.10%2B-2496ED.svg?logo=docker)](https://www.docker.com/)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg?logo=python)](https://www.python.org/)
 [![React](https://img.shields.io/badge/React-18.2%2B-61DAFB.svg?logo=react)](https://react.dev/)
@@ -11,7 +11,7 @@ A modern, containerized web interface for monitoring Arpwatch network activity. 
 ## 📸 Screenshots
 
 <!-- Add screenshots here when available -->
-![Dashboard](screenshot/Sample.png)
+<!-- Example: ![Dashboard](screenshots/dashboard.png) -->
 
 ## 🚀 Features
 
@@ -90,6 +90,10 @@ The project consists of two main components (Arpwatch runs natively on the host)
 **Backend Container:**
 - `ARPWATCH_DATA_DIR`: Path to Arpwatch data directory (default: `/var/lib/arpwatch`)
 - `ARPWATCH_LOG_DIR`: Path to Arpwatch log directory (default: `/var/log/arpwatch`)
+- `ENABLE_OS_FINGERPRINTING`: Enable/disable OS fingerprinting feature (default: `true`)
+- `ENABLE_PORT_SCANNING`: Enable/disable port scanning feature (default: `true`)
+- `SCAN_PORTS`: Comma-separated list of ports to scan (default: `21,22,80,443,445`)
+- `EXCLUDE_IP_RANGES`: Comma-separated CIDR ranges to exclude from monitoring/scanning (e.g., `192.168.2.0/24` for VPN ranges) (default: empty)
 
 **Frontend Container:**
 - `REACT_APP_API_URL`: Backend API URL (default: `http://localhost:8000`)
