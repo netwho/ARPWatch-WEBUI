@@ -18,6 +18,7 @@ function App() {
   const [scanning, setScanning] = useState({});
   const [showTooltip, setShowTooltip] = useState({});
   const [config, setConfig] = useState({ os_fingerprinting_enabled: true, port_scanning_enabled: true });
+  const [errors, setErrors] = useState([]);
 
   useEffect(() => {
     fetchData();
@@ -28,22 +29,34 @@ function App() {
   }, [autoRefresh]);
 
   const fetchData = async () => {
-    try {
-      const [hostsRes, eventsRes, statsRes, configRes] = await Promise.all([
-        axios.get(`${API_URL}/api/hosts`),
-        axios.get(`${API_URL}/api/events?limit=50`),
-        axios.get(`${API_URL}/api/stats`),
-        axios.get(`${API_URL}/api/config`).catch(() => ({ data: { os_fingerprinting_enabled: true, port_scanning_enabled: true } }))
-      ]);
-      setHosts(hostsRes.data);
-      setEvents(eventsRes.data);
-      setStats(statsRes.data);
-      setConfig(configRes.data);
-      setLoading(false);
-    } catch (error) {
-      console.error('Error fetching data:', error);
-      setLoading(false);
-    }
+    const newErrors = [];
+    const fallbackConfig = { os_fingerprinting_enabled: true, port_scanning_enabled: true };
+
+    const safeFetch = async (label, fn) => {
+      try {
+        const res = await fn();
+        return res.data;
+      } catch (err) {
+        console.error(`Error fetching ${label}:`, err);
+        const status = err?.response?.status;
+        newErrors.push(`${label} failed${status ? ` (${status})` : ''}`);
+        return null;
+      }
+    };
+
+    const [hostsData, eventsData, statsData, configData] = await Promise.all([
+      safeFetch('hosts', () => axios.get(`${API_URL}/api/hosts`)),
+      safeFetch('events', () => axios.get(`${API_URL}/api/events?limit=50`)),
+      safeFetch('stats', () => axios.get(`${API_URL}/api/stats`)),
+      safeFetch('config', () => axios.get(`${API_URL}/api/config`))
+    ]);
+
+    if (hostsData) setHosts(hostsData);
+    if (eventsData) setEvents(eventsData);
+    if (statsData) setStats(statsData);
+    setConfig(configData || fallbackConfig);
+    setErrors(newErrors);
+    setLoading(false);
   };
 
   const filteredHosts = hosts.filter(host => {
@@ -67,6 +80,13 @@ function App() {
       default:
         return 'badge-info';
     }
+  };
+
+  const getStatusLabel = (status) => {
+    if (!status) return 'active';
+    if (status.includes('red')) return 'inactive';
+    if (status.includes('orange')) return 'idle';
+    return 'active';
   };
 
   const formatMacAddress = (mac) => {
@@ -153,6 +173,17 @@ function App() {
           </div>
         </div>
       </header>
+
+      {errors.length > 0 && (
+        <div className="error-banner">
+          <div className="error-title">Data refresh issues:</div>
+          <div className="error-messages">
+            {errors.map((err, idx) => (
+              <span key={idx} className="error-chip">{err}</span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {stats && (
         <div className="stats-section">
@@ -271,7 +302,7 @@ function App() {
                           <td className="status-cell">
                             <div className="status-container">
                               <span className={`badge badge-${host.status}`}>
-                                active
+                                {getStatusLabel(host.status)}
                               </span>
                               {config.port_scanning_enabled && (
                                 <button
@@ -379,7 +410,7 @@ function App() {
       </div>
 
       <footer className="app-footer">
-        <p>Arpwatch Web UI v0.2.1 | Network Monitoring Dashboard</p>
+        <p>Arpwatch Web UI v0.2.2 | Network Monitoring Dashboard</p>
       </footer>
     </div>
   );

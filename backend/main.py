@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 import time
 
-app = FastAPI(title="Arpwatch API", version="0.2.1")
+app = FastAPI(title="Arpwatch API", version="0.2.2")
 
 # Enable CORS
 app.add_middleware(
@@ -515,12 +515,20 @@ def parse_arp_dat():
 def parse_log_files():
     """Parse arpwatch log files for events"""
     events = []
-    
-    log_files = [
-        os.path.join(ARPWATCH_LOG_DIR, f) 
-        for f in os.listdir(ARPWATCH_LOG_DIR) 
-        if os.path.isfile(os.path.join(ARPWATCH_LOG_DIR, f)) and f.endswith('.log')
-    ]
+
+    # If the log directory is missing or unreadable, bail out gracefully
+    if not os.path.exists(ARPWATCH_LOG_DIR):
+        return events
+
+    try:
+        log_files = [
+            os.path.join(ARPWATCH_LOG_DIR, f)
+            for f in os.listdir(ARPWATCH_LOG_DIR)
+            if os.path.isfile(os.path.join(ARPWATCH_LOG_DIR, f)) and f.endswith('.log')
+        ]
+    except Exception as e:
+        print(f"Error reading log directory {ARPWATCH_LOG_DIR}: {e}")
+        log_files = []
     
     # Also check syslog if available
     syslog_path = "/var/log/syslog"
@@ -585,7 +593,7 @@ def get_last_seen_timestamps():
 async def root():
     return {
         "message": "Arpwatch API", 
-        "version": "0.2.1",
+        "version": "0.2.2",
         "features": {
             "os_fingerprinting": ENABLE_OS_FINGERPRINTING,
             "port_scanning": ENABLE_PORT_SCANNING,
