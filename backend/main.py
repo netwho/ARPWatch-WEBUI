@@ -12,7 +12,7 @@ from pathlib import Path
 import time
 import threading
 
-app = FastAPI(title="Arpwatch API", version="0.2.3")
+app = FastAPI(title="Arpwatch API", version="0.2.5")
 
 # Enable CORS
 app.add_middleware(
@@ -625,7 +625,7 @@ def get_last_seen_timestamps():
 async def root():
     return {
         "message": "Arpwatch API", 
-        "version": "0.2.3",
+        "version": "0.2.5",
         "features": {
             "os_fingerprinting": ENABLE_OS_FINGERPRINTING,
             "port_scanning": ENABLE_PORT_SCANNING,

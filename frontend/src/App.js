@@ -117,80 +117,6 @@ function App() {
     }
   }, [rescanStatus]);
 
-  const filteredHosts = hosts.filter(host => {
-    if (!searchQuery) return true;
-    const query = searchQuery.toLowerCase();
-    return (
-      host.ip_address.toLowerCase().includes(query) ||
-      host.mac_address.toLowerCase().includes(query) ||
-      (host.hostname && host.hostname.toLowerCase().includes(query))
-    );
-  });
-
-  const ipToNum = (ip) => {
-    const parts = ip.split('.').map(Number);
-    if (parts.length !== 4 || parts.some(isNaN)) return 0;
-    return parts.reduce((acc, part) => (acc << 8) + part, 0);
-  };
-
-  const sortedHosts = [...filteredHosts].sort((a, b) => {
-    const { column, direction } = sortConfig;
-    const dir = direction === 'asc' ? 1 : -1;
-    const getVal = (host) => {
-      switch (column) {
-        case 'ip_address':
-          return ipToNum(formatIpAddress(host.ip_address));
-        case 'mac_address':
-          return host.mac_address || '';
-        case 'hostname':
-          return host.hostname || '';
-        case 'os_fingerprint':
-          return host.os_fingerprint || '';
-        case 'age':
-          return host.age || '';
-        case 'status':
-          return host.status || '';
-        default:
-          return '';
-      }
-    };
-    const valA = getVal(a);
-    const valB = getVal(b);
-    if (typeof valA === 'number' && typeof valB === 'number') {
-      return (valA - valB) * dir;
-    }
-    return String(valA).localeCompare(String(valB)) * dir;
-  });
-
-  const toggleSort = (column) => {
-    setSortConfig(prev => {
-      if (prev.column === column) {
-        return { column, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
-      }
-      return { column, direction: 'asc' };
-    });
-  };
-
-  const getEventBadgeClass = (eventType) => {
-    switch (eventType) {
-      case 'new':
-        return 'badge-new';
-      case 'changed':
-        return 'badge-changed';
-      case 'flip-flop':
-        return 'badge-warning';
-      default:
-        return 'badge-info';
-    }
-  };
-
-  const getStatusLabel = (status) => {
-    if (!status) return 'active';
-    if (status.includes('red')) return 'inactive';
-    if (status.includes('orange')) return 'idle';
-    return 'active';
-  };
-
   const formatMacAddress = (mac) => {
     if (!mac) return mac;
     // Remove any existing colons, dashes, and dots
@@ -225,6 +151,81 @@ function App() {
       return ip.replace(/:/g, '.').replace(/\.+/g, '.').replace(/^\.|\.$/g, '');
     }
     return ip;
+  };
+
+  const filteredHosts = hosts.filter(host => {
+    if (!searchQuery) return true;
+    const query = searchQuery.toLowerCase();
+    return (
+      host.ip_address.toLowerCase().includes(query) ||
+      host.mac_address.toLowerCase().includes(query) ||
+      (host.hostname && host.hostname.toLowerCase().includes(query))
+    );
+  });
+
+  const ipToNum = (ip) => {
+    if (!ip) return 0;
+    const parts = String(ip).split('.').map(Number);
+    if (parts.length !== 4 || parts.some((p) => Number.isNaN(p))) return 0;
+    return parts.reduce((acc, part) => (acc << 8) + part, 0);
+  };
+
+  const sortedHosts = [...filteredHosts].sort((a, b) => {
+    const { column, direction } = sortConfig;
+    const dir = direction === 'asc' ? 1 : -1;
+    const getVal = (host) => {
+      switch (column) {
+        case 'ip_address':
+          return ipToNum(formatIpAddress(host.ip_address));
+        case 'mac_address':
+          return host.mac_address || '';
+        case 'hostname':
+          return host.hostname || '';
+        case 'os_fingerprint':
+          return host.os_fingerprint || '';
+        case 'age':
+          return host.age || '';
+        case 'status':
+          return host.status || '';
+        default:
+          return '';
+      }
+    };
+    const valA = getVal(a) ?? '';
+    const valB = getVal(b) ?? '';
+    if (typeof valA === 'number' && typeof valB === 'number') {
+      return (valA - valB) * dir;
+    }
+    return String(valA).localeCompare(String(valB)) * dir;
+  });
+
+  const toggleSort = (column) => {
+    setSortConfig(prev => {
+      if (prev.column === column) {
+        return { column, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+      }
+      return { column, direction: 'asc' };
+    });
+  };
+
+  const getEventBadgeClass = (eventType) => {
+    switch (eventType) {
+      case 'new':
+        return 'badge-new';
+      case 'changed':
+        return 'badge-changed';
+      case 'flip-flop':
+        return 'badge-warning';
+      default:
+        return 'badge-info';
+    }
+  };
+
+  const getStatusLabel = (status) => {
+    if (!status) return 'active';
+    if (status.includes('red')) return 'inactive';
+    if (status.includes('orange')) return 'idle';
+    return 'active';
   };
 
   const handlePortScan = async (ip) => {
@@ -611,7 +612,7 @@ function App() {
       </div>
 
       <footer className="app-footer">
-        <p>Arpwatch Web UI v0.2.3 | Network Monitoring Dashboard</p>
+        <p>Arpwatch Web UI v0.2.5 | Network Monitoring Dashboard</p>
       </footer>
     </div>
   );
