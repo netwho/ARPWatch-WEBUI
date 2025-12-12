@@ -19,6 +19,8 @@ function App() {
   const [showTooltip, setShowTooltip] = useState({});
   const [config, setConfig] = useState({ os_fingerprinting_enabled: true, port_scanning_enabled: true });
   const [errors, setErrors] = useState([]);
+  const [rescanStatus, setRescanStatus] = useState('idle');
+  const [rescanError, setRescanError] = useState(null);
 
   useEffect(() => {
     fetchData();
@@ -58,6 +60,38 @@ function App() {
     setErrors(newErrors);
     setLoading(false);
   };
+
+  const triggerFingerprintRescan = async () => {
+    setRescanError(null);
+    try {
+      const res = await axios.post(`${API_URL}/api/os-fingerprint/rescan`);
+      setRescanStatus(res.data?.status || 'started');
+    } catch (err) {
+      setRescanError(err?.response?.data?.detail || err.message || 'Failed to start rescan');
+      setRescanStatus('idle');
+    }
+  };
+
+  useEffect(() => {
+    if (rescanStatus === 'started' || rescanStatus === 'in_progress') {
+      const interval = setInterval(async () => {
+        try {
+          const res = await axios.get(`${API_URL}/api/os-fingerprint/status`);
+          const status = res.data?.status || 'idle';
+          setRescanStatus(status);
+          if (status === 'idle') {
+            clearInterval(interval);
+            fetchData(); // Refresh data after rescan completes
+          }
+        } catch (err) {
+          setRescanError(err?.response?.data?.detail || err.message || 'Rescan status failed');
+          setRescanStatus('idle');
+          clearInterval(interval);
+        }
+      }, 2000);
+      return () => clearInterval(interval);
+    }
+  }, [rescanStatus]);
 
   const filteredHosts = hosts.filter(host => {
     if (!searchQuery) return true;
@@ -170,6 +204,18 @@ function App() {
             <button onClick={fetchData} className="btn-refresh">
               🔄 Refresh
             </button>
+            <button
+              onClick={triggerFingerprintRescan}
+              className="btn-refresh"
+              disabled={rescanStatus === 'started' || rescanStatus === 'in_progress'}
+              title="Re-run OS fingerprinting for all hosts"
+            >
+              🛰️ Rescan fingerprints
+            </button>
+            {(rescanStatus === 'started' || rescanStatus === 'in_progress') && (
+              <span className="rescan-status">Rescanning fingerprints…</span>
+            )}
+            {rescanError && <span className="rescan-error">Rescan error: {rescanError}</span>}
           </div>
         </div>
       </header>
@@ -410,7 +456,7 @@ function App() {
       </div>
 
       <footer className="app-footer">
-        <p>Arpwatch Web UI v0.2.2 | Network Monitoring Dashboard</p>
+        <p>Arpwatch Web UI v0.2.3 | Network Monitoring Dashboard</p>
       </footer>
     </div>
   );

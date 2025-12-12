@@ -10,8 +10,9 @@ import socket
 import subprocess
 from pathlib import Path
 import time
+import threading
 
-app = FastAPI(title="Arpwatch API", version="0.2.2")
+app = FastAPI(title="Arpwatch API", version="0.2.3")
 
 # Enable CORS
 app.add_middleware(
@@ -35,6 +36,13 @@ ENABLE_PORT_SCANNING = os.getenv("ENABLE_PORT_SCANNING", "true").lower() == "tru
 # Port scanning configuration
 SCAN_PORTS_STR = os.getenv("SCAN_PORTS", "21,22,80,443,445")
 DEFAULT_SCAN_PORTS = [int(p.strip()) for p in SCAN_PORTS_STR.split(",") if p.strip().isdigit()]
+
+# OS fingerprinting behavior/tuning
+OS_FINGERPRINT_RETRY_HOURS = int(os.getenv("OS_FINGERPRINT_RETRY_HOURS", "0"))
+OS_FINGERPRINT_TIMEOUT = int(os.getenv("OS_FINGERPRINT_TIMEOUT", "10"))
+
+# Background rescan flag
+rescan_in_progress = False
 
 # IP range exclusion (comma-separated CIDR notation, e.g., "192.168.2.0/24,10.0.0.0/8")
 EXCLUDE_IP_RANGES_STR = os.getenv("EXCLUDE_IP_RANGES", "")
@@ -124,14 +132,14 @@ def reverse_dns_lookup(ip_address):
     except (socket.herror, socket.gaierror, OSError):
         return None
 
-def os_fingerprint(ip_address: str) -> Optional[str]:
-    """Perform OS fingerprinting using nmap (runs once per IP, cached, retries once per day)"""
+def os_fingerprint(ip_address: str, force: bool = False) -> Optional[str]:
+    """Perform OS fingerprinting using nmap (cached, with optional retries)"""
     # Check if OS fingerprinting is enabled
     if not ENABLE_OS_FINGERPRINTING:
         return None
     
     # Check cache first
-    if ip_address in os_cache:
+    if not force and ip_address in os_cache:
         cached_entry = os_cache[ip_address]
         os_result = cached_entry.get("os")
         timestamp_str = cached_entry.get("timestamp")
@@ -140,18 +148,18 @@ def os_fingerprint(ip_address: str) -> Optional[str]:
         if os_result:
             return os_result
         
-        # If result is None/Unknown, check if we should retry (once per day)
+        # If result is None/Unknown, check if we should retry
         if timestamp_str:
             try:
                 cached_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
                 now = datetime.now()
-                time_diff = now - cached_time
+                hours_since = (now - cached_time).total_seconds() / 3600
                 
-                # Retry if it's been more than 24 hours since last attempt
-                if time_diff.total_seconds() < 86400:  # Less than 24 hours
-                    return None  # Return None to show "Unknown", but don't retry yet
-            except:
-                pass  # If timestamp parsing fails, continue to retry
+                # If retries are disabled (default) or we haven't reached the window, skip
+                if OS_FINGERPRINT_RETRY_HOURS <= 0 or hours_since < OS_FINGERPRINT_RETRY_HOURS:
+                    return None  # Return cached unknown without blocking the request
+            except Exception:
+                return None  # If timestamp parsing fails, avoid retrying in request path
     
     # No cache or should retry - perform scan
     
@@ -163,7 +171,7 @@ def os_fingerprint(ip_address: str) -> Optional[str]:
         result = subprocess.run(
             ["nmap", "-Pn", "-O", "--osscan-limit", "--max-retries", "1", "-T4", ip_address],
             capture_output=True,
-            timeout=15,  # Reduced to 15 second timeout for faster response
+            timeout=OS_FINGERPRINT_TIMEOUT,  # Tunable, defaults to 10s to keep API responsive
             text=True
         )
         
@@ -213,6 +221,21 @@ def os_fingerprint(ip_address: str) -> Optional[str]:
         }
         save_os_cache()
         return None  # Return None to show "Unknown"
+
+def rescan_os_fingerprints():
+    """Trigger OS fingerprinting for all known hosts in the background."""
+    global rescan_in_progress
+    if rescan_in_progress:
+        return
+    rescan_in_progress = True
+    try:
+        entries = parse_arp_dat()
+        for ip in entries.keys():
+            if should_exclude_ip(ip):
+                continue
+            os_fingerprint(ip, force=True)
+    finally:
+        rescan_in_progress = False
 
 def format_age(last_seen_timestamp: Optional[str]) -> Optional[str]:
     """Format age from timestamp to human-readable string"""
@@ -593,7 +616,7 @@ def get_last_seen_timestamps():
 async def root():
     return {
         "message": "Arpwatch API", 
-        "version": "0.2.2",
+        "version": "0.2.3",
         "features": {
             "os_fingerprinting": ENABLE_OS_FINGERPRINTING,
             "port_scanning": ENABLE_PORT_SCANNING,
@@ -602,7 +625,7 @@ async def root():
     }
 
 @app.get("/api/hosts", response_model=List[ARPEntry])
-async def get_hosts():
+def get_hosts():
     """Get all ARP entries with OS fingerprinting and age"""
     entries = parse_arp_dat()
     last_seen_map = get_last_seen_timestamps()
@@ -642,7 +665,7 @@ async def get_hosts():
     return result
 
 @app.get("/api/hosts/{ip_address}", response_model=ARPEntry)
-async def get_host(ip_address: str):
+def get_host(ip_address: str):
     """Get specific ARP entry by IP"""
     entries = parse_arp_dat()
     if ip_address not in entries:
@@ -650,13 +673,13 @@ async def get_host(ip_address: str):
     return entries[ip_address]
 
 @app.get("/api/events", response_model=List[ARPEvent])
-async def get_events(limit: int = 100):
+def get_events(limit: int = 100):
     """Get recent ARP events"""
     events = parse_log_files()
     return events[:limit]
 
 @app.get("/api/stats", response_model=Stats)
-async def get_stats():
+def get_stats():
     """Get statistics about ARP entries including OS distribution"""
     entries = parse_arp_dat()
     events = parse_log_files()
@@ -688,7 +711,7 @@ async def get_stats():
     )
 
 @app.get("/api/search")
-async def search_hosts(q: str):
+def search_hosts(q: str):
     """Search hosts by IP, MAC, or hostname"""
     entries = parse_arp_dat()
     q_lower = q.lower()
@@ -703,7 +726,7 @@ async def search_hosts(q: str):
     return results
 
 @app.get("/api/scan/{ip_address}", response_model=PortScanResult)
-async def scan_host_ports(ip_address: str):
+def scan_host_ports(ip_address: str):
     """Scan configured ports on a host"""
     # Check if port scanning is enabled
     if not ENABLE_PORT_SCANNING:
@@ -717,8 +740,24 @@ async def scan_host_ports(ip_address: str):
     result = scan_ports(ip_address)
     return result
 
+@app.post("/api/os-fingerprint/rescan")
+def trigger_os_rescan():
+    """Start a background OS fingerprint rescan for all known hosts."""
+    global rescan_in_progress
+    if rescan_in_progress:
+        return {"status": "in_progress"}
+    
+    thread = threading.Thread(target=rescan_os_fingerprints, daemon=True)
+    thread.start()
+    return {"status": "started"}
+
+@app.get("/api/os-fingerprint/status")
+def os_rescan_status():
+    """Return status of the OS fingerprint background rescan."""
+    return {"status": "in_progress" if rescan_in_progress else "idle"}
+
 @app.get("/api/config")
-async def get_config():
+def get_config():
     """Get API configuration and feature flags"""
     return {
         "os_fingerprinting_enabled": ENABLE_OS_FINGERPRINTING,
@@ -728,7 +767,7 @@ async def get_config():
     }
 
 @app.get("/api/debug")
-async def debug_info():
+def debug_info():
     """Debug endpoint to check arpwatch data files"""
     debug_info = {
         "arp_dat_exists": os.path.exists(ARP_DAT_FILE),

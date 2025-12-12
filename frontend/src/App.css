@@ -92,6 +92,16 @@
   background: rgba(255, 255, 255, 0.3);
 }
 
+.rescan-status {
+  color: #e5e7eb;
+  font-size: 0.9rem;
+}
+
+.rescan-error {
+  color: #fecdd3;
+  font-size: 0.9rem;
+}
+
 .stats-section {
   max-width: 1400px;
   margin: 2rem auto;
@@ -357,6 +367,7 @@
   align-items: center;
   gap: 0.5rem;
   position: relative;
+  width: 100%;
 }
 
 .btn-scan {
@@ -373,6 +384,7 @@
   justify-content: center;
   min-width: 32px;
   height: 28px;
+  margin-left: auto; /* align to right edge of cell */
 }
 
 .btn-scan:hover:not(:disabled) {
