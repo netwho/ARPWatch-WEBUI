@@ -89,6 +89,12 @@ def save_os_cache():
     except Exception as e:
         print(f"Error saving OS cache: {e}")
 
+def get_cached_os(ip_address: str) -> Optional[str]:
+    """Return cached OS fingerprint without triggering a scan"""
+    if ip_address in os_cache:
+        return os_cache[ip_address].get("os")
+    return None
+
 # Load cache on startup
 load_os_cache()
 
@@ -123,6 +129,9 @@ class PortScanResult(BaseModel):
     scan_time: str
     status: str  # "success", "error", "timeout"
     error: Optional[str] = None
+
+class FingerprintUpdate(BaseModel):
+    os_fingerprint: str
 
 def reverse_dns_lookup(ip_address):
     """Perform reverse DNS lookup for an IP address"""
@@ -739,6 +748,64 @@ def scan_host_ports(ip_address: str):
     # Perform port scan
     result = scan_ports(ip_address)
     return result
+
+@app.get("/api/fingerprints/unknown", response_model=List[ARPEntry])
+def get_unknown_fingerprints():
+    """Return hosts whose OS fingerprint is unknown (cached-only, no scans)."""
+    entries = parse_arp_dat()
+    last_seen_map = get_last_seen_timestamps()
+    result = []
+    for ip, entry in entries.items():
+        if should_exclude_ip(ip):
+            continue
+        cached_os = get_cached_os(ip)
+        if cached_os:
+            continue  # already known
+        last_seen = last_seen_map.get(ip) or entry.get("file_timestamp")
+        age = format_age(last_seen) if last_seen else None
+        status = get_inactivity_status(last_seen) if last_seen else entry.get("status", "active")
+        result.append(ARPEntry(
+            ip_address=entry["ip_address"],
+            mac_address=entry["mac_address"],
+            hostname=entry.get("hostname"),
+            first_seen=None,
+            last_seen=last_seen,
+            age=age,
+            os_fingerprint=None,
+            status=status
+        ))
+    return result
+
+@app.post("/api/fingerprints/{ip_address}", response_model=ARPEntry)
+def set_manual_fingerprint(ip_address: str, body: FingerprintUpdate):
+    """Manually set OS fingerprint for a host (persists in cache)."""
+    entries = parse_arp_dat()
+    if ip_address not in entries:
+        raise HTTPException(status_code=404, detail="Host not found")
+    os_value = body.os_fingerprint.strip()
+    if not os_value:
+        raise HTTPException(status_code=400, detail="OS fingerprint cannot be empty")
+    os_cache[ip_address] = {
+        "os": os_value,
+        "timestamp": datetime.now().isoformat(),
+        "manual": True
+    }
+    save_os_cache()
+    entry = entries[ip_address]
+    last_seen_map = get_last_seen_timestamps()
+    last_seen = last_seen_map.get(ip_address) or entry.get("file_timestamp")
+    age = format_age(last_seen) if last_seen else None
+    status = get_inactivity_status(last_seen) if last_seen else entry.get("status", "active")
+    return ARPEntry(
+        ip_address=entry["ip_address"],
+        mac_address=entry["mac_address"],
+        hostname=entry.get("hostname"),
+        first_seen=None,
+        last_seen=last_seen,
+        age=age,
+        os_fingerprint=os_value,
+        status=status
+    )
 
 @app.post("/api/os-fingerprint/rescan")
 def trigger_os_rescan():

@@ -102,6 +102,25 @@
   font-size: 0.9rem;
 }
 
+.fingerprint-input-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.fingerprint-input {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  font-size: 0.95rem;
+}
+
+.fingerprint-input:focus {
+  outline: none;
+  border-color: #667eea;
+}
+
 .stats-section {
   max-width: 1400px;
   margin: 2rem auto;
@@ -257,6 +276,8 @@
   font-weight: 600;
   color: #374151;
   border-bottom: 2px solid #e5e7eb;
+  cursor: pointer;
+  user-select: none;
 }
 
 .hosts-table td {

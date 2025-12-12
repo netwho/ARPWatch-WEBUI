@@ -21,6 +21,11 @@ function App() {
   const [errors, setErrors] = useState([]);
   const [rescanStatus, setRescanStatus] = useState('idle');
   const [rescanError, setRescanError] = useState(null);
+  const [sortConfig, setSortConfig] = useState({ column: 'ip_address', direction: 'asc' });
+  const [fingerprints, setFingerprints] = useState([]);
+  const [fingerprintsLoading, setFingerprintsLoading] = useState(false);
+  const [fingerprintInputs, setFingerprintInputs] = useState({});
+  const [fingerprintError, setFingerprintError] = useState(null);
 
   useEffect(() => {
     fetchData();
@@ -29,6 +34,12 @@ function App() {
       return () => clearInterval(interval);
     }
   }, [autoRefresh]);
+
+  useEffect(() => {
+    if (activeTab === 'fingerprints') {
+      fetchFingerprints();
+    }
+  }, [activeTab]);
 
   const fetchData = async () => {
     const newErrors = [];
@@ -59,6 +70,19 @@ function App() {
     setConfig(configData || fallbackConfig);
     setErrors(newErrors);
     setLoading(false);
+  };
+
+  const fetchFingerprints = async () => {
+    setFingerprintsLoading(true);
+    setFingerprintError(null);
+    try {
+      const res = await axios.get(`${API_URL}/api/fingerprints/unknown`);
+      setFingerprints(res.data || []);
+    } catch (err) {
+      setFingerprintError(err?.response?.data?.detail || err.message || 'Failed to load fingerprints');
+    } finally {
+      setFingerprintsLoading(false);
+    }
   };
 
   const triggerFingerprintRescan = async () => {
@@ -102,6 +126,50 @@ function App() {
       (host.hostname && host.hostname.toLowerCase().includes(query))
     );
   });
+
+  const ipToNum = (ip) => {
+    const parts = ip.split('.').map(Number);
+    if (parts.length !== 4 || parts.some(isNaN)) return 0;
+    return parts.reduce((acc, part) => (acc << 8) + part, 0);
+  };
+
+  const sortedHosts = [...filteredHosts].sort((a, b) => {
+    const { column, direction } = sortConfig;
+    const dir = direction === 'asc' ? 1 : -1;
+    const getVal = (host) => {
+      switch (column) {
+        case 'ip_address':
+          return ipToNum(formatIpAddress(host.ip_address));
+        case 'mac_address':
+          return host.mac_address || '';
+        case 'hostname':
+          return host.hostname || '';
+        case 'os_fingerprint':
+          return host.os_fingerprint || '';
+        case 'age':
+          return host.age || '';
+        case 'status':
+          return host.status || '';
+        default:
+          return '';
+      }
+    };
+    const valA = getVal(a);
+    const valB = getVal(b);
+    if (typeof valA === 'number' && typeof valB === 'number') {
+      return (valA - valB) * dir;
+    }
+    return String(valA).localeCompare(String(valB)) * dir;
+  });
+
+  const toggleSort = (column) => {
+    setSortConfig(prev => {
+      if (prev.column === column) {
+        return { column, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+      }
+      return { column, direction: 'asc' };
+    });
+  };
 
   const getEventBadgeClass = (eventType) => {
     switch (eventType) {
@@ -294,6 +362,12 @@ function App() {
           >
             Events ({events.length})
           </button>
+          <button
+            className={activeTab === 'fingerprints' ? 'tab active' : 'tab'}
+            onClick={() => setActiveTab('fingerprints')}
+          >
+            Fingerprints ({fingerprints.length})
+          </button>
         </div>
 
         {activeTab === 'hosts' && (
@@ -314,23 +388,37 @@ function App() {
                 <table className="hosts-table">
                   <thead>
                     <tr>
-                      <th>IP Address</th>
-                      <th>MAC Address</th>
-                      <th>Hostname</th>
-                      {config.os_fingerprinting_enabled && <th>OS Fingerprint</th>}
-                      <th>Age</th>
-                      <th>Status</th>
+                      <th onClick={() => toggleSort('ip_address')} className="sortable">
+                        IP Address {sortConfig.column === 'ip_address' ? (sortConfig.direction === 'asc' ? '▲' : '▼') : ''}
+                      </th>
+                      <th onClick={() => toggleSort('mac_address')} className="sortable">
+                        MAC Address {sortConfig.column === 'mac_address' ? (sortConfig.direction === 'asc' ? '▲' : '▼') : ''}
+                      </th>
+                      <th onClick={() => toggleSort('hostname')} className="sortable">
+                        Hostname {sortConfig.column === 'hostname' ? (sortConfig.direction === 'asc' ? '▲' : '▼') : ''}
+                      </th>
+                      {config.os_fingerprinting_enabled && (
+                        <th onClick={() => toggleSort('os_fingerprint')} className="sortable">
+                          OS Fingerprint {sortConfig.column === 'os_fingerprint' ? (sortConfig.direction === 'asc' ? '▲' : '▼') : ''}
+                        </th>
+                      )}
+                      <th onClick={() => toggleSort('age')} className="sortable">
+                        Age {sortConfig.column === 'age' ? (sortConfig.direction === 'asc' ? '▲' : '▼') : ''}
+                      </th>
+                      <th onClick={() => toggleSort('status')} className="sortable">
+                        Status {sortConfig.column === 'status' ? (sortConfig.direction === 'asc' ? '▲' : '▼') : ''}
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredHosts.length === 0 ? (
+                    {sortedHosts.length === 0 ? (
                       <tr>
                         <td colSpan={config.os_fingerprinting_enabled ? "6" : "5"} className="no-data">
                           No hosts found
                         </td>
                       </tr>
                     ) : (
-                      filteredHosts.map((host, index) => (
+                      sortedHosts.map((host, index) => (
                         <tr key={index}>
                           <td className="ip-cell">{formatIpAddress(host.ip_address)}</td>
                           <td className="mac-cell">{formatMacAddress(host.mac_address)}</td>
@@ -449,6 +537,73 @@ function App() {
                     </div>
                   ))
                 )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'fingerprints' && (
+          <div className="tab-content">
+            {fingerprintError && <div className="error-banner">Error: {fingerprintError}</div>}
+            {fingerprintsLoading ? (
+              <div className="loading">Loading fingerprints...</div>
+            ) : fingerprints.length === 0 ? (
+              <div className="no-data">No unknown fingerprints 🎉</div>
+            ) : (
+              <div className="table-container">
+                <table className="hosts-table">
+                  <thead>
+                    <tr>
+                      <th>IP Address</th>
+                      <th>MAC Address</th>
+                      <th>Hostname</th>
+                      <th>Status</th>
+                      <th>Assign OS Fingerprint</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fingerprints.map((host, idx) => (
+                      <tr key={idx}>
+                        <td className="ip-cell">{formatIpAddress(host.ip_address)}</td>
+                        <td className="mac-cell">{formatMacAddress(host.mac_address)}</td>
+                        <td className="hostname-cell">{host.hostname || <span className="no-hostname">—</span>}</td>
+                        <td className="status-cell">
+                          <span className={`badge badge-${host.status}`}>{getStatusLabel(host.status)}</span>
+                        </td>
+                        <td>
+                          <div className="fingerprint-input-row">
+                            <input
+                              type="text"
+                              placeholder="Enter OS (e.g., Linux, Windows 10)"
+                              value={fingerprintInputs[host.ip_address] ?? ''}
+                              onChange={(e) => setFingerprintInputs(prev => ({ ...prev, [host.ip_address]: e.target.value }))}
+                              className="fingerprint-input"
+                            />
+                            <button
+                              className="btn-scan"
+                              onClick={async () => {
+                                try {
+                                  await axios.post(`${API_URL}/api/fingerprints/${host.ip_address}`, {
+                                    os_fingerprint: fingerprintInputs[host.ip_address] || ''
+                                  });
+                                  // Refresh data and list
+                                  fetchData();
+                                  fetchFingerprints();
+                                } catch (err) {
+                                  setFingerprintError(err?.response?.data?.detail || err.message || 'Failed to save fingerprint');
+                                }
+                              }}
+                              disabled={!fingerprintInputs[host.ip_address]}
+                              title="Save OS fingerprint"
+                            >
+                              💾
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </div>
