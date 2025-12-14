@@ -459,11 +459,13 @@
 
 .mac-cell {
   font-family: 'Courier New', monospace;
-  color: #6b7280;
+  color: #1f2937;
+  font-weight: 500;
 }
 
 .hostname-cell {
-  color: #374151;
+  color: #111827;
+  font-weight: 500;
 }
 
 .no-hostname {
@@ -517,7 +519,8 @@
 
 .os-cell {
   font-size: 0.9rem;
-  color: #374151;
+  color: #111827;
+  font-weight: 500;
   max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -532,7 +535,8 @@
 
 .age-cell {
   font-family: 'Courier New', monospace;
-  color: #6b7280;
+  color: #1f2937;
+  font-weight: 500;
   font-size: 0.9rem;
 }
 
@@ -989,6 +993,26 @@ body.dark-theme .hosts-table td {
 
 body.dark-theme .hosts-table tbody tr:hover {
   background: #3a3a3a;
+}
+
+body.dark-theme .mac-cell {
+  color: #d1d5db;
+  font-weight: 500;
+}
+
+body.dark-theme .hostname-cell {
+  color: #f3f4f6;
+  font-weight: 500;
+}
+
+body.dark-theme .os-cell {
+  color: #f3f4f6;
+  font-weight: 500;
+}
+
+body.dark-theme .age-cell {
+  color: #d1d5db;
+  font-weight: 500;
 }
 
 body.dark-theme .tab-button {

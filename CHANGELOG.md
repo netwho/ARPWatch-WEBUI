@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2025-12-13
+
+### Added
+- **Fingerprint Management:**
+  - Export functionality for manual fingerprints (MAC/IP mapping) to JSON file
+  - Import functionality to merge fingerprint data from JSON files
+  - "Show all records" toggle in fingerprints tab to view all fingerprints (not just unknown)
+  - Edit/overwrite/delete functionality for existing fingerprints
+  - IP Address sorting in fingerprints table
+- **Chart Visualization:**
+  - Toggle between bar chart and pie chart for OS distribution
+  - Chart type preference saved to localStorage
+- **DNS Lookup:**
+  - "Lookup Hostnames" button to trigger reverse DNS lookups for IPs without hostnames
+- **Host Management:**
+  - Automatic cleanup of idle hosts (inactive for >7 days) with backup creation
+- **UI Improvements:**
+  - Improved font contrast for table fields (MAC, Hostname, OS, Age) - brighter colors
+  - Dark theme support for port scan results
+
+### Changed
+- Auto-refresh disabled by default (can be enabled via toggle)
+- Auto-refresh toggle styled as normal text with transparent background
+- Rescanning logic now preserves existing fingerprints (manual and auto-detected)
+- Rescanning will not overwrite existing fingerprints with "Unknown"
+
+### Fixed
+- Added `python-multipart` dependency for file upload support (fixes 502 errors on import)
+- Bar chart hover effects removed (no background color change on mouse over)
+- Statistics cards hover effects removed for better readability
+- Tooltip styling improved with dark gray background
+
 ## [0.2.6] - 2025-12-13
 
 ### Changed

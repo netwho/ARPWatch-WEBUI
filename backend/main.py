@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -8,6 +8,7 @@ import re
 import json
 import socket
 import subprocess
+import shutil
 from pathlib import Path
 import time
 import threading
@@ -15,7 +16,7 @@ import sys
 from collections import deque
 from datetime import datetime
 
-app = FastAPI(title="Arpwatch API", version="0.2.6")
+app = FastAPI(title="Arpwatch API", version="0.3.0")
 
 # In-memory log buffer to capture application logs
 LOG_BUFFER = deque(maxlen=500)  # Keep last 500 log entries
@@ -319,43 +320,86 @@ def os_fingerprint(ip_address: str, force: bool = False) -> Optional[str]:
             os_info = os_match.group(1).strip()
             # Clean up OS string
             os_info = re.sub(r'\s+', ' ', os_info)
-            # Store in cache
+            # Check if there's an existing fingerprint (manual or auto-detected)
+            existing_entry = os_cache.get(ip_address, {})
+            existing_os = existing_entry.get("os")
+            is_manual = existing_entry.get("manual", False)
+            
+            # Only update if:
+            # 1. No existing fingerprint, OR
+            # 2. Existing fingerprint is None/Unknown (and not manual)
+            if not existing_os or (not is_manual and existing_os is None):
+                # Store in cache
+                os_cache[ip_address] = {
+                    "os": os_info,
+                    "timestamp": datetime.now().isoformat()
+                }
+                save_os_cache()
+                return os_info
+            else:
+                # Preserve existing fingerprint
+                print(f"Preserving existing fingerprint for {ip_address}: {existing_os}")
+                return existing_os
+        
+        # If no OS detected, don't overwrite existing fingerprints
+        existing_entry = os_cache.get(ip_address, {})
+        existing_os = existing_entry.get("os")
+        is_manual = existing_entry.get("manual", False)
+        
+        # Only cache Unknown if there's no existing fingerprint
+        if not existing_os and not is_manual:
             os_cache[ip_address] = {
-                "os": os_info,
-                "timestamp": datetime.now().isoformat()
+                "os": None,
+                "timestamp": datetime.now().isoformat(),
+                "status": "unknown"
             }
             save_os_cache()
-            return os_info
+        elif existing_os:
+            print(f"Preserving existing fingerprint for {ip_address}: {existing_os} (scan returned no result)")
+            return existing_os
         
-        # If no OS detected, cache as None (Unknown) with timestamp
-        os_cache[ip_address] = {
-            "os": None,
-            "timestamp": datetime.now().isoformat(),
-            "status": "unknown"
-        }
-        save_os_cache()
         return None  # Return None to indicate "Unknown"
         
     except subprocess.TimeoutExpired:
-        # Cache failure with timestamp for retry after 24 hours
-        os_cache[ip_address] = {
-            "os": None,
-            "timestamp": datetime.now().isoformat(),
-            "status": "unknown",
-            "error": "timeout"
-        }
-        save_os_cache()
+        # Don't overwrite existing fingerprints on timeout
+        existing_entry = os_cache.get(ip_address, {})
+        existing_os = existing_entry.get("os")
+        is_manual = existing_entry.get("manual", False)
+        
+        if not existing_os and not is_manual:
+            # Only cache timeout if there's no existing fingerprint
+            os_cache[ip_address] = {
+                "os": None,
+                "timestamp": datetime.now().isoformat(),
+                "status": "unknown",
+                "error": "timeout"
+            }
+            save_os_cache()
+        elif existing_os:
+            print(f"Preserving existing fingerprint for {ip_address}: {existing_os} (scan timed out)")
+            return existing_os
+        
         return None  # Return None to show "Unknown"
     except Exception as e:
         print(f"Error running nmap for {ip_address}: {e}")
-        # Cache failure with timestamp for retry after 24 hours
-        os_cache[ip_address] = {
-            "os": None,
-            "timestamp": datetime.now().isoformat(),
-            "status": "unknown",
-            "error": str(e)
-        }
-        save_os_cache()
+        # Don't overwrite existing fingerprints on error
+        existing_entry = os_cache.get(ip_address, {})
+        existing_os = existing_entry.get("os")
+        is_manual = existing_entry.get("manual", False)
+        
+        if not existing_os and not is_manual:
+            # Only cache error if there's no existing fingerprint
+            os_cache[ip_address] = {
+                "os": None,
+                "timestamp": datetime.now().isoformat(),
+                "status": "unknown",
+                "error": str(e)
+            }
+            save_os_cache()
+        elif existing_os:
+            print(f"Preserving existing fingerprint for {ip_address}: {existing_os} (scan error)")
+            return existing_os
+        
         return None  # Return None to show "Unknown"
 
 def rescan_os_fingerprints():
@@ -369,6 +413,19 @@ def rescan_os_fingerprints():
         for ip in entries.keys():
             if should_exclude_ip(ip):
                 continue
+            
+            # Check if there's an existing fingerprint before rescanning
+            existing_entry = os_cache.get(ip, {})
+            existing_os = existing_entry.get("os")
+            is_manual = existing_entry.get("manual", False)
+            
+            # Skip if there's a manual fingerprint (never overwrite manual)
+            if is_manual:
+                print(f"Skipping rescan for {ip}: manual fingerprint exists ({existing_os})")
+                continue
+            
+            # Only rescan if no fingerprint exists or if we want to retry Unknown
+            # The os_fingerprint function will handle preserving existing fingerprints
             os_fingerprint(ip, force=True)
     finally:
         rescan_in_progress = False
@@ -797,11 +854,144 @@ def get_last_seen_timestamps():
     
     return last_seen
 
+def parse_timestamp_to_datetime(timestamp_str: Optional[str]) -> Optional[datetime]:
+    """Parse timestamp string to datetime object"""
+    if not timestamp_str:
+        return None
+    
+    try:
+        # Try ISO format first
+        if 'T' in timestamp_str or '-' in timestamp_str:
+            return datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+        # Try arpwatch format: "Nov 18 10:30:45"
+        try:
+            dt = datetime.strptime(timestamp_str, "%b %d %H:%M:%S")
+            # Assume current year
+            return dt.replace(year=datetime.now().year)
+        except:
+            # Try Unix timestamp
+            if re.match(r'^\d+$', timestamp_str):
+                return datetime.fromtimestamp(int(timestamp_str))
+            return None
+    except Exception as e:
+        print(f"[ERROR] Error parsing timestamp '{timestamp_str}': {e}")
+        return None
+
+def cleanup_idle_hosts():
+    """Remove hosts from arp.dat that haven't been seen in 7 days (1 week)"""
+    if not os.path.exists(ARP_DAT_FILE):
+        return
+    
+    try:
+        # Get last seen timestamps from log files
+        last_seen_map = get_last_seen_timestamps()
+        
+        # Parse arp.dat to get all entries with their timestamps
+        entries = parse_arp_dat()
+        
+        # Calculate cutoff time (7 days ago)
+        cutoff_time = datetime.now() - timedelta(days=7)
+        
+        # Identify hosts to keep (active within last 7 days)
+        hosts_to_keep = []
+        hosts_removed = []
+        
+        # Read the original file to preserve format
+        try:
+            with open(ARP_DAT_FILE, 'r', errors='ignore') as f:
+                lines = f.readlines()
+        except Exception as e:
+            print(f"[ERROR] Error reading arp.dat for cleanup: {e}")
+            return
+        
+        # Process each line
+        for line in lines:
+            line_stripped = line.strip()
+            if not line_stripped or line_stripped.startswith('#'):
+                # Keep comments and empty lines
+                hosts_to_keep.append(line)
+                continue
+            
+            # Parse the line to extract IP
+            parts = line_stripped.split()
+            if len(parts) < 2:
+                hosts_to_keep.append(line)
+                continue
+            
+            # Determine IP address
+            first = parts[0]
+            second = parts[1]
+            
+            if is_mac_address(first):
+                ip = second
+            elif is_mac_address(second):
+                ip = first
+            else:
+                ip = second  # Default assumption
+            
+            # Clean up IP
+            if ':' in ip and not ip.count(':') == 5:
+                ip = ip.replace(':', '.')
+            
+            if not is_ip_address(ip):
+                # Keep malformed lines
+                hosts_to_keep.append(line)
+                continue
+            
+            # Skip excluded IP ranges
+            if should_exclude_ip(ip):
+                hosts_to_keep.append(line)
+                continue
+            
+            # Get last seen timestamp
+            last_seen_str = last_seen_map.get(ip)
+            if not last_seen_str:
+                # If no log entry, use file timestamp from entry
+                entry = entries.get(ip, {})
+                last_seen_str = entry.get("file_timestamp")
+            
+            # Parse timestamp
+            last_seen_dt = parse_timestamp_to_datetime(last_seen_str)
+            
+            if last_seen_dt is None:
+                # If we can't parse timestamp, keep the host (better safe than sorry)
+                hosts_to_keep.append(line)
+                continue
+            
+            # Check if host is idle (more than 7 days)
+            if last_seen_dt < cutoff_time:
+                hosts_removed.append(ip)
+                print(f"Removing idle host: {ip} (last seen: {last_seen_str}, {format_age(last_seen_str)})")
+            else:
+                hosts_to_keep.append(line)
+        
+        # Write back only active hosts
+        if hosts_removed:
+            try:
+                # Create backup
+                backup_file = f"{ARP_DAT_FILE}.backup.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                shutil.copy2(ARP_DAT_FILE, backup_file)
+                print(f"Created backup: {backup_file}")
+                
+                # Write cleaned file
+                with open(ARP_DAT_FILE, 'w', errors='ignore') as f:
+                    f.writelines(hosts_to_keep)
+                
+                print(f"✓ Cleaned up {len(hosts_removed)} idle hosts (inactive for >7 days)")
+                print(f"  Removed IPs: {', '.join(hosts_removed[:10])}{'...' if len(hosts_removed) > 10 else ''}")
+            except Exception as e:
+                print(f"[ERROR] Error writing cleaned arp.dat: {e}")
+        else:
+            print("✓ No idle hosts to clean up")
+            
+    except Exception as e:
+        print(f"[ERROR] Error in cleanup_idle_hosts: {e}")
+
 @app.get("/")
 async def root():
     return {
         "message": "Arpwatch API", 
-        "version": "0.2.6",
+        "version": "0.3.0",
         "features": {
             "os_fingerprinting": ENABLE_OS_FINGERPRINTING,
             "port_scanning": ENABLE_PORT_SCANNING,
@@ -812,6 +1002,12 @@ async def root():
 @app.get("/api/hosts", response_model=List[ARPEntry])
 def get_hosts():
     """Get all ARP entries with OS fingerprinting and age"""
+    # Clean up idle hosts (inactive for >7 days) before fetching
+    try:
+        cleanup_idle_hosts()
+    except Exception as e:
+        print(f"[WARNING] Error during idle host cleanup: {e}")
+    
     try:
         entries = parse_arp_dat()
     except Exception as e:
@@ -1081,6 +1277,177 @@ def os_rescan_status():
     """Return status of the OS fingerprint background rescan."""
     return {"status": "in_progress" if rescan_in_progress else "idle"}
 
+@app.get("/api/fingerprints/all")
+def get_all_fingerprints():
+    """Get all fingerprints (both manual and auto-detected)"""
+    entries = parse_arp_dat()
+    last_seen_map = get_last_seen_timestamps()
+    result = []
+    for ip, entry in entries.items():
+        if should_exclude_ip(ip):
+            continue
+        
+        # Get OS fingerprint from cache
+        os_info = get_cached_os(ip)
+        is_manual = False
+        if ip in os_cache:
+            is_manual = os_cache[ip].get("manual", False)
+        
+        # Get last seen timestamp
+        last_seen = last_seen_map.get(ip)
+        if not last_seen:
+            last_seen = entry.get("file_timestamp")
+        
+        # Calculate age
+        age = format_age(last_seen) if last_seen else None
+        
+        # Determine status
+        status = get_inactivity_status(last_seen) if last_seen else "active"
+        
+        result.append({
+            "ip_address": ip,
+            "mac_address": entry.get("mac_address"),
+            "hostname": entry.get("hostname"),
+            "os_fingerprint": os_info,
+            "is_manual": is_manual,
+            "age": age,
+            "status": status
+        })
+    return result
+
+@app.get("/api/fingerprints/export")
+def export_fingerprints():
+    """Export manual fingerprints (MAC/IP mapping) as JSON"""
+    entries = parse_arp_dat()
+    manual_fingerprints = []
+    
+    for ip, entry in entries.items():
+        if should_exclude_ip(ip):
+            continue
+        
+        # Only export manual fingerprints
+        if ip in os_cache and os_cache[ip].get("manual", False):
+            os_value = os_cache[ip].get("os")
+            if os_value:
+                manual_fingerprints.append({
+                    "mac_address": entry.get("mac_address"),
+                    "ip_address": ip,
+                    "os_fingerprint": os_value,
+                    "hostname": entry.get("hostname"),
+                    "timestamp": os_cache[ip].get("timestamp")
+                })
+    
+    return {
+        "fingerprints": manual_fingerprints,
+        "export_date": datetime.now().isoformat(),
+        "count": len(manual_fingerprints)
+    }
+
+@app.post("/api/fingerprints/import")
+async def import_fingerprints(file: UploadFile = File(...)):
+    """Import and merge fingerprint data from JSON file"""
+    try:
+        contents = await file.read()
+        data = json.loads(contents.decode('utf-8'))
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON file: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error reading file: {str(e)}")
+    
+    imported = data.get("fingerprints", [])
+    if not imported:
+        raise HTTPException(status_code=400, detail="No fingerprints provided")
+    
+    merged_count = 0
+    skipped_count = 0
+    error_count = 0
+    
+    # Load current entries to map MAC to IP
+    entries = parse_arp_dat()
+    mac_to_ip = {}
+    for ip, entry in entries.items():
+        mac = entry.get("mac_address")
+        if mac:
+            mac_to_ip[mac.lower()] = ip
+    
+    for fp in imported:
+        try:
+            mac = fp.get("mac_address", "").lower()
+            ip = fp.get("ip_address", "")
+            os_value = fp.get("os_fingerprint", "").strip()
+            
+            if not os_value:
+                skipped_count += 1
+                continue
+            
+            # Prefer MAC address for matching, fallback to IP
+            target_ip = None
+            if mac and mac in mac_to_ip:
+                target_ip = mac_to_ip[mac]
+            elif ip and is_ip_address(ip) and ip in entries:
+                target_ip = ip
+            else:
+                # If neither MAC nor IP matches, skip
+                skipped_count += 1
+                continue
+            
+            # Merge fingerprint (overwrite existing)
+            os_cache[target_ip] = {
+                "os": os_value,
+                "timestamp": fp.get("timestamp") or datetime.now().isoformat(),
+                "manual": True
+            }
+            merged_count += 1
+            print(f"Imported fingerprint: {target_ip} -> {os_value}")
+        except Exception as e:
+            error_count += 1
+            print(f"[ERROR] Error importing fingerprint: {e}")
+    
+    # Save cache
+    try:
+        save_os_cache()
+    except Exception as e:
+        print(f"[ERROR] Error saving OS cache after import: {e}")
+    
+    return {
+        "message": f"Import complete: {merged_count} merged, {skipped_count} skipped, {error_count} errors",
+        "merged": merged_count,
+        "skipped": skipped_count,
+        "errors": error_count
+    }
+
+@app.put("/api/fingerprints/{ip_address}")
+def update_fingerprint(ip_address: str, body: FingerprintUpdate):
+    """Update existing fingerprint"""
+    entries = parse_arp_dat()
+    if ip_address not in entries:
+        raise HTTPException(status_code=404, detail="Host not found")
+    
+    os_value = body.os_fingerprint.strip()
+    if not os_value:
+        raise HTTPException(status_code=400, detail="OS fingerprint cannot be empty")
+    
+    os_cache[ip_address] = {
+        "os": os_value,
+        "timestamp": datetime.now().isoformat(),
+        "manual": True
+    }
+    save_os_cache()
+    
+    return {"message": f"Fingerprint updated for {ip_address}", "os_fingerprint": os_value}
+
+@app.delete("/api/fingerprints/{ip_address}")
+def delete_fingerprint(ip_address: str):
+    """Delete fingerprint (remove from cache)"""
+    if ip_address not in os_cache:
+        raise HTTPException(status_code=404, detail="Fingerprint not found")
+    
+    deleted_os = os_cache[ip_address].get("os")
+    del os_cache[ip_address]
+    save_os_cache()
+    
+    return {"message": f"Fingerprint deleted for {ip_address}", "deleted_os": deleted_os}
+
 @app.get("/api/config")
 def get_config():
     """Get API configuration and feature flags"""
@@ -1100,6 +1467,78 @@ def get_config():
             "scan_ports": [21, 22, 80, 443, 445],
             "exclude_ip_ranges": []
         }
+
+@app.post("/api/dns/lookup-missing")
+def lookup_missing_hostnames():
+    """Trigger reverse DNS lookups for all IPs without hostnames"""
+    try:
+        entries = parse_arp_dat()
+        last_seen_map = get_last_seen_timestamps()
+        
+        # Find IPs without hostnames
+        ips_without_hostnames = []
+        for ip, entry in entries.items():
+            # Skip excluded IP ranges
+            if should_exclude_ip(ip):
+                continue
+            
+            hostname = entry.get("hostname")
+            # Check if hostname is missing or empty
+            if not hostname:
+                # Check cache - if it's not in cache or cache has empty string, try lookup
+                cached = dns_cache.get(ip)
+                if cached is None:  # Not in cache yet
+                    ips_without_hostnames.append(ip)
+                elif cached == "":  # Previously failed, but user wants to retry
+                    # Clear cache entry to allow retry
+                    if ip in dns_cache:
+                        del dns_cache[ip]
+                    ips_without_hostnames.append(ip)
+        
+        if not ips_without_hostnames:
+            return {
+                "message": "All hosts already have hostnames or have been checked",
+                "looked_up": 0,
+                "found": 0,
+                "failed": 0
+            }
+        
+        # Perform DNS lookups
+        found_count = 0
+        failed_count = 0
+        
+        print(f"Starting DNS lookups for {len(ips_without_hostnames)} IPs without hostnames...")
+        
+        for ip in ips_without_hostnames:
+            try:
+                hostname = get_hostname_with_cache(ip, force_lookup=True)
+                if hostname:
+                    found_count += 1
+                    print(f"✓ DNS lookup successful: {ip} -> {hostname}")
+                else:
+                    failed_count += 1
+                    print(f"✗ DNS lookup failed for {ip} (no hostname)")
+            except Exception as e:
+                failed_count += 1
+                print(f"[ERROR] Error in DNS lookup for {ip}: {e}")
+        
+        # Save cache after all lookups
+        try:
+            save_dns_cache()
+        except Exception as e:
+            print(f"[ERROR] Error saving DNS cache: {e}")
+        
+        print(f"DNS lookup complete: {found_count} found, {failed_count} failed")
+        
+        return {
+            "message": f"DNS lookups completed for {len(ips_without_hostnames)} IPs",
+            "looked_up": len(ips_without_hostnames),
+            "found": found_count,
+            "failed": failed_count
+        }
+    except Exception as e:
+        print(f"[ERROR] Error in lookup_missing_hostnames: {e}")
+        raise HTTPException(status_code=500, detail=f"Error performing DNS lookups: {str(e)}")
 
 @app.get("/api/logs")
 def get_logs():

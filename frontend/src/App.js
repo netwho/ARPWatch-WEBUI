@@ -22,11 +22,14 @@ function App() {
   const [rescanStatus, setRescanStatus] = useState('idle');
   const [rescanError, setRescanError] = useState(null);
   const [sortConfig, setSortConfig] = useState({ column: 'ip_address', direction: 'asc' });
+  const [fingerprintSortConfig, setFingerprintSortConfig] = useState({ column: 'ip_address', direction: 'asc' });
   const [osFilter, setOsFilter] = useState(null);
   const [fingerprints, setFingerprints] = useState([]);
   const [fingerprintsLoading, setFingerprintsLoading] = useState(false);
   const [fingerprintInputs, setFingerprintInputs] = useState({});
   const [fingerprintError, setFingerprintError] = useState(null);
+  const [showAllFingerprints, setShowAllFingerprints] = useState(false);
+  const [editingFingerprint, setEditingFingerprint] = useState(null);
   const [fingerprintSuccess, setFingerprintSuccess] = useState(null);
   const [showLogs, setShowLogs] = useState(false);
   const [logs, setLogs] = useState([]);
@@ -35,6 +38,11 @@ function App() {
     // Check localStorage for saved theme preference
     const saved = localStorage.getItem('darkMode');
     return saved ? JSON.parse(saved) : false;
+  });
+  const [chartType, setChartType] = useState(() => {
+    // Check localStorage for saved chart type preference
+    const saved = localStorage.getItem('chartType');
+    return saved || 'bar'; // 'bar' or 'pie'
   });
 
   useEffect(() => {
@@ -49,6 +57,11 @@ function App() {
   }, [darkMode]);
 
   useEffect(() => {
+    // Save chart type preference to localStorage
+    localStorage.setItem('chartType', chartType);
+  }, [chartType]);
+
+  useEffect(() => {
     fetchData();
     if (autoRefresh) {
       const interval = setInterval(fetchData, 5000); // Refresh every 5 seconds
@@ -60,7 +73,7 @@ function App() {
     if (activeTab === 'fingerprints') {
       fetchFingerprints();
     }
-  }, [activeTab]);
+  }, [activeTab, showAllFingerprints]);
 
   const fetchData = async () => {
     setLoading(true);
@@ -100,7 +113,8 @@ function App() {
     setFingerprintsLoading(true);
     setFingerprintError(null);
     try {
-      const res = await axios.get(`${API_URL}/api/fingerprints/unknown`);
+      const endpoint = showAllFingerprints ? '/api/fingerprints/all' : '/api/fingerprints/unknown';
+      const res = await axios.get(`${API_URL}${endpoint}`);
       setFingerprints(res.data || []);
     } catch (err) {
       setFingerprintError(err?.response?.data?.detail || err.message || 'Failed to load fingerprints');
@@ -264,6 +278,34 @@ function App() {
     });
   };
 
+  const toggleFingerprintSort = (column) => {
+    setFingerprintSortConfig(prev => {
+      if (prev.column === column) {
+        return { column, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+      }
+      return { column, direction: 'asc' };
+    });
+  };
+
+  const sortedFingerprints = [...fingerprints].sort((a, b) => {
+    const { column, direction } = fingerprintSortConfig;
+    const dir = direction === 'asc' ? 1 : -1;
+    const getVal = (host) => {
+      switch (column) {
+        case 'ip_address':
+          return ipToNum(formatIpAddress(host.ip_address || host.ip));
+        default:
+          return '';
+      }
+    };
+    const valA = getVal(a) ?? '';
+    const valB = getVal(b) ?? '';
+    if (typeof valA === 'number' && typeof valB === 'number') {
+      return (valA - valB) * dir;
+    }
+    return String(valA).localeCompare(String(valB)) * dir;
+  });
+
   const getEventBadgeClass = (eventType) => {
     switch (eventType) {
       case 'new':
@@ -369,6 +411,25 @@ function App() {
               🛰️ Rescan fingerprints
             </button>
             <button
+              onClick={async () => {
+                try {
+                  const res = await axios.post(`${API_URL}/api/dns/lookup-missing`);
+                  if (res.data) {
+                    const { looked_up, found, failed } = res.data;
+                    alert(`DNS Lookup Complete!\n\nLooked up: ${looked_up} IPs\nFound: ${found} hostnames\nFailed: ${failed}`);
+                    // Refresh data to show new hostnames
+                    fetchData();
+                  }
+                } catch (err) {
+                  alert(`Error performing DNS lookups: ${err.response?.data?.detail || err.message}`);
+                }
+              }}
+              className="btn-refresh"
+              title="Perform reverse DNS lookups for IPs without hostnames"
+            >
+              🔍 Lookup Hostnames
+            </button>
+            <button
               onClick={() => setDarkMode(!darkMode)}
               className="btn-refresh"
               title={darkMode ? "Switch to light theme" : "Switch to dark theme"}
@@ -437,39 +498,100 @@ function App() {
           {stats.os_distribution && Object.keys(stats.os_distribution).length > 0 && (
             <div className="os-chart-container">
               <div className="os-chart-card">
-                <h3>OS Distribution {osFilter && <span className="filter-badge">Filtered: {osFilter}</span>}</h3>
-                <ResponsiveContainer width="100%" height={300}>
-                  <BarChart
-                    layout="vertical"
-                    data={Object.entries(stats.os_distribution)
-                      .map(([name, value]) => ({ name, value }))
-                      .sort((a, b) => b.value - a.value)}
-                    margin={{ top: 5, right: 30, left: 60, bottom: 5 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis type="number" />
-                    <YAxis dataKey="name" type="category" width={100} />
-                    <Tooltip />
-                    <Bar 
-                      dataKey="value" 
-                      fill="#667eea" 
-                      radius={[0, 8, 8, 0]}
-                      onClick={(data) => {
-                        if (data && data.name) {
-                          setOsFilter(data.name);
-                        }
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                  <h3 style={{ margin: 0 }}>OS Distribution {osFilter && <span className="filter-badge">Filtered: {osFilter}</span>}</h3>
+                  <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <button
+                      onClick={() => setChartType('bar')}
+                      className="btn-refresh"
+                      style={{ 
+                        background: chartType === 'bar' ? '#667eea' : 'rgba(255, 255, 255, 0.2)',
+                        fontSize: '0.85rem',
+                        padding: '0.4rem 0.8rem'
                       }}
-                      style={{ cursor: 'pointer' }}
+                      title="Bar Chart"
                     >
-                      {Object.entries(stats.os_distribution).map((entry, index) => (
-                        <Cell 
-                          key={`cell-${index}`} 
-                          fill={['#667eea', '#764ba2', '#f093fb', '#4facfe', '#43e97b', '#fa709a'][index % 6]}
-                          style={{ cursor: 'pointer' }}
-                        />
-                      ))}
-                    </Bar>
-                  </BarChart>
+                      📊 Bar
+                    </button>
+                    <button
+                      onClick={() => setChartType('pie')}
+                      className="btn-refresh"
+                      style={{ 
+                        background: chartType === 'pie' ? '#667eea' : 'rgba(255, 255, 255, 0.2)',
+                        fontSize: '0.85rem',
+                        padding: '0.4rem 0.8rem'
+                      }}
+                      title="Pie Chart"
+                    >
+                      🥧 Pie
+                    </button>
+                  </div>
+                </div>
+                <ResponsiveContainer width="100%" height={300}>
+                  {chartType === 'bar' ? (
+                    <BarChart
+                      layout="vertical"
+                      data={Object.entries(stats.os_distribution)
+                        .map(([name, value]) => ({ name, value }))
+                        .sort((a, b) => b.value - a.value)}
+                      margin={{ top: 5, right: 30, left: 60, bottom: 5 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis type="number" />
+                      <YAxis dataKey="name" type="category" width={100} />
+                      <Tooltip />
+                      <Bar 
+                        dataKey="value" 
+                        fill="#667eea" 
+                        radius={[0, 8, 8, 0]}
+                        onClick={(data) => {
+                          if (data && data.name) {
+                            setOsFilter(data.name);
+                          }
+                        }}
+                        style={{ cursor: 'pointer' }}
+                      >
+                        {Object.entries(stats.os_distribution).map((entry, index) => (
+                          <Cell 
+                            key={`cell-${index}`} 
+                            fill={['#667eea', '#764ba2', '#f093fb', '#4facfe', '#43e97b', '#fa709a'][index % 6]}
+                            style={{ cursor: 'pointer' }}
+                          />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  ) : (
+                    <PieChart>
+                      <Pie
+                        data={Object.entries(stats.os_distribution)
+                          .map(([name, value]) => ({ name, value }))
+                          .sort((a, b) => b.value - a.value)}
+                        cx="50%"
+                        cy="50%"
+                        labelLine={false}
+                        label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                        outerRadius={100}
+                        fill="#8884d8"
+                        dataKey="value"
+                        onClick={(data) => {
+                          if (data && data.name) {
+                            setOsFilter(data.name);
+                          }
+                        }}
+                        style={{ cursor: 'pointer' }}
+                      >
+                        {Object.entries(stats.os_distribution).map((entry, index) => (
+                          <Cell 
+                            key={`cell-${index}`} 
+                            fill={['#667eea', '#764ba2', '#f093fb', '#4facfe', '#43e97b', '#fa709a'][index % 6]}
+                            style={{ cursor: 'pointer' }}
+                          />
+                        ))}
+                      </Pie>
+                      <Tooltip />
+                      <Legend />
+                    </PieChart>
+                  )}
                 </ResponsiveContainer>
               </div>
             </div>
@@ -685,80 +807,225 @@ function App() {
 
         {activeTab === 'fingerprints' && (
           <div className="tab-content">
+            <div className="fingerprint-controls" style={{ marginBottom: '1rem', display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
+              <label className="switch" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <input
+                  type="checkbox"
+                  checked={showAllFingerprints}
+                  onChange={(e) => setShowAllFingerprints(e.target.checked)}
+                />
+                <span>Show all records</span>
+              </label>
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await axios.get(`${API_URL}/api/fingerprints/export`);
+                    const dataStr = JSON.stringify(res.data, null, 2);
+                    const dataBlob = new Blob([dataStr], { type: 'application/json' });
+                    const url = URL.createObjectURL(dataBlob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = `fingerprints_export_${new Date().toISOString().split('T')[0]}.json`;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    URL.revokeObjectURL(url);
+                    setFingerprintSuccess(`Exported ${res.data.count} fingerprints`);
+                    setTimeout(() => setFingerprintSuccess(null), 3000);
+                  } catch (err) {
+                    setFingerprintError(err?.response?.data?.detail || err.message || 'Failed to export fingerprints');
+                  }
+                }}
+                className="btn-refresh"
+                title="Export manual fingerprints to JSON file"
+              >
+                📥 Export
+              </button>
+              <label className="btn-refresh" style={{ cursor: 'pointer', margin: 0 }}>
+                📤 Import
+                <input
+                  type="file"
+                  accept=".json"
+                  style={{ display: 'none' }}
+                  onChange={async (e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+                    try {
+                      const formData = new FormData();
+                      formData.append('file', file);
+                      const res = await axios.post(`${API_URL}/api/fingerprints/import`, formData, {
+                        headers: { 'Content-Type': 'multipart/form-data' }
+                      });
+                      setFingerprintSuccess(`${res.data.message}`);
+                      fetchFingerprints();
+                      fetchData();
+                      setTimeout(() => setFingerprintSuccess(null), 5000);
+                      e.target.value = ''; // Reset file input
+                    } catch (err) {
+                      setFingerprintError(err?.response?.data?.detail || err.message || 'Failed to import fingerprints');
+                      e.target.value = ''; // Reset file input
+                    }
+                  }}
+                />
+              </label>
+            </div>
             {fingerprintError && <div className="error-banner">Error: {fingerprintError}</div>}
             {fingerprintSuccess && <div className="success-banner">✓ {fingerprintSuccess}</div>}
             {fingerprintsLoading ? (
               <div className="loading">Loading fingerprints...</div>
             ) : fingerprints.length === 0 ? (
-              <div className="no-data">No unknown fingerprints 🎉</div>
+              <div className="no-data">{showAllFingerprints ? 'No fingerprints found' : 'No unknown fingerprints 🎉'}</div>
             ) : (
               <div className="table-container">
                 <table className="hosts-table">
                   <thead>
                     <tr>
-                      <th>IP Address</th>
+                      <th onClick={() => toggleFingerprintSort('ip_address')} className="sortable">
+                        IP Address {fingerprintSortConfig.column === 'ip_address' ? (fingerprintSortConfig.direction === 'asc' ? '▲' : '▼') : ''}
+                      </th>
                       <th>MAC Address</th>
                       <th>Hostname</th>
+                      <th>OS Fingerprint</th>
                       <th>Status</th>
-                      <th>Assign OS Fingerprint</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {fingerprints.map((host, idx) => (
-                      <tr key={idx}>
-                        <td className="ip-cell">{formatIpAddress(host.ip_address)}</td>
-                        <td className="mac-cell">{formatMacAddress(host.mac_address)}</td>
-                        <td className="hostname-cell">{host.hostname || <span className="no-hostname">—</span>}</td>
-                        <td className="status-cell">
-                          <span className={`badge badge-${host.status}`}>{getStatusLabel(host.status)}</span>
-                        </td>
-                        <td>
-                          <div className="fingerprint-input-row">
-                            <input
-                              type="text"
-                              placeholder="Enter OS (e.g., Linux, Windows 10)"
-                              value={fingerprintInputs[host.ip_address] ?? ''}
-                              onChange={(e) => setFingerprintInputs(prev => ({ ...prev, [host.ip_address]: e.target.value }))}
-                              className="fingerprint-input"
-                            />
-                            <button
-                              className="btn-scan"
-                              onClick={async () => {
-                                try {
-                                  setFingerprintError(null);
-                                  setFingerprintSuccess(null);
-                                  await axios.post(`${API_URL}/api/fingerprints/${host.ip_address}`, {
-                                    os_fingerprint: fingerprintInputs[host.ip_address] || ''
-                                  });
-                                  // Show success feedback
-                                  setFingerprintSuccess(`Fingerprint saved for ${formatIpAddress(host.ip_address)}`);
-                                  // Clear the input field
-                                  setFingerprintInputs(prev => {
-                                    const updated = { ...prev };
-                                    delete updated[host.ip_address];
-                                    return updated;
-                                  });
-                                  // Refresh fingerprints list immediately
-                                  fetchFingerprints();
-                                  // Delay full data refresh to allow user to see success message
-                                  setTimeout(() => {
-                                    fetchData();
-                                    setFingerprintSuccess(null);
-                                  }, 2000);
-                                } catch (err) {
-                                  setFingerprintError(err?.response?.data?.detail || err.message || 'Failed to save fingerprint');
-                                  setFingerprintSuccess(null);
-                                }
-                              }}
-                              disabled={!fingerprintInputs[host.ip_address]}
-                              title="Save OS fingerprint"
-                            >
-                              💾
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                    {sortedFingerprints.map((host, idx) => {
+                      const ip = host.ip_address || host.ip;
+                      const mac = host.mac_address || host.mac;
+                      const os = host.os_fingerprint || host.os;
+                      return (
+                        <tr key={idx}>
+                          <td className="ip-cell">{formatIpAddress(ip)}</td>
+                          <td className="mac-cell">{formatMacAddress(mac)}</td>
+                          <td className="hostname-cell">{host.hostname || <span className="no-hostname">—</span>}</td>
+                          <td className="os-cell">
+                            {editingFingerprint === ip ? (
+                              <input
+                                type="text"
+                                defaultValue={os || ''}
+                                onBlur={async (e) => {
+                                  const newValue = e.target.value.trim();
+                                  if (newValue && newValue !== os) {
+                                    try {
+                                      await axios.put(`${API_URL}/api/fingerprints/${ip}`, {
+                                        os_fingerprint: newValue
+                                      });
+                                      setFingerprintSuccess(`Fingerprint updated for ${formatIpAddress(ip)}`);
+                                      fetchFingerprints();
+                                      setTimeout(() => setFingerprintSuccess(null), 3000);
+                                    } catch (err) {
+                                      setFingerprintError(err?.response?.data?.detail || err.message || 'Failed to update fingerprint');
+                                    }
+                                  }
+                                  setEditingFingerprint(null);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.target.blur();
+                                  } else if (e.key === 'Escape') {
+                                    setEditingFingerprint(null);
+                                  }
+                                }}
+                                autoFocus
+                                className="fingerprint-input"
+                                style={{ width: '100%', maxWidth: '200px' }}
+                              />
+                            ) : (
+                              <span>{os || <span className="no-os">Unknown</span>}</span>
+                            )}
+                          </td>
+                          <td className="status-cell">
+                            <span className={`badge badge-${host.status || 'active'}`}>{getStatusLabel(host.status || 'active')}</span>
+                          </td>
+                          <td>
+                            <div style={{ display: 'flex', gap: '0.5rem' }}>
+                              {!os || editingFingerprint === ip ? (
+                                <button
+                                  className="btn-scan"
+                                  onClick={() => setEditingFingerprint(ip)}
+                                  title="Edit fingerprint"
+                                >
+                                  ✏️
+                                </button>
+                              ) : (
+                                <>
+                                  <button
+                                    className="btn-scan"
+                                    onClick={() => setEditingFingerprint(ip)}
+                                    title="Edit fingerprint"
+                                  >
+                                    ✏️
+                                  </button>
+                                  <button
+                                    className="btn-scan"
+                                    onClick={async () => {
+                                      if (window.confirm(`Delete fingerprint for ${formatIpAddress(ip)}?`)) {
+                                        try {
+                                          await axios.delete(`${API_URL}/api/fingerprints/${ip}`);
+                                          setFingerprintSuccess(`Fingerprint deleted for ${formatIpAddress(ip)}`);
+                                          fetchFingerprints();
+                                          setTimeout(() => setFingerprintSuccess(null), 3000);
+                                        } catch (err) {
+                                          setFingerprintError(err?.response?.data?.detail || err.message || 'Failed to delete fingerprint');
+                                        }
+                                      }
+                                    }}
+                                    title="Delete fingerprint"
+                                    style={{ background: '#ef4444' }}
+                                  >
+                                    🗑️
+                                  </button>
+                                </>
+                              )}
+                              {!os && (
+                                <div className="fingerprint-input-row" style={{ display: 'inline-flex', marginLeft: '0.5rem' }}>
+                                  <input
+                                    type="text"
+                                    placeholder="Enter OS"
+                                    value={fingerprintInputs[ip] ?? ''}
+                                    onChange={(e) => setFingerprintInputs(prev => ({ ...prev, [ip]: e.target.value }))}
+                                    className="fingerprint-input"
+                                    style={{ width: '150px' }}
+                                  />
+                                  <button
+                                    className="btn-scan"
+                                    onClick={async () => {
+                                      try {
+                                        setFingerprintError(null);
+                                        setFingerprintSuccess(null);
+                                        await axios.post(`${API_URL}/api/fingerprints/${ip}`, {
+                                          os_fingerprint: fingerprintInputs[ip] || ''
+                                        });
+                                        setFingerprintSuccess(`Fingerprint saved for ${formatIpAddress(ip)}`);
+                                        setFingerprintInputs(prev => {
+                                          const updated = { ...prev };
+                                          delete updated[ip];
+                                          return updated;
+                                        });
+                                        fetchFingerprints();
+                                        setTimeout(() => {
+                                          fetchData();
+                                          setFingerprintSuccess(null);
+                                        }, 2000);
+                                      } catch (err) {
+                                        setFingerprintError(err?.response?.data?.detail || err.message || 'Failed to save fingerprint');
+                                        setFingerprintSuccess(null);
+                                      }
+                                    }}
+                                    disabled={!fingerprintInputs[ip]}
+                                    title="Save OS fingerprint"
+                                  >
+                                    💾
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -768,7 +1035,7 @@ function App() {
       </div>
 
       <footer className="app-footer">
-        <p>Arpwatch Web UI v0.2.6 | Network Monitoring Dashboard</p>
+        <p>Arpwatch Web UI v0.3.0 | Network Monitoring Dashboard</p>
       </footer>
     </div>
   );
