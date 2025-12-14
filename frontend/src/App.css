@@ -1103,3 +1103,58 @@ body.dark-theme .switch input[type="checkbox"] {
   accent-color: #667eea;
 }
 
+/* Dark Theme Styles for Port Scan Results */
+body.dark-theme .scan-tooltip {
+  background: #2d2d2d;
+  border-color: #667eea;
+  color: #e5e5e5;
+}
+
+body.dark-theme .tooltip-content {
+  background: #2d2d2d;
+  color: #e5e5e5;
+}
+
+body.dark-theme .port-table thead {
+  background: #1a1a1a;
+}
+
+body.dark-theme .port-table th {
+  color: #e5e5e5;
+  border-bottom-color: #404040;
+}
+
+body.dark-theme .port-table td {
+  border-bottom-color: #404040;
+  color: #e5e5e5;
+}
+
+body.dark-theme .port-table tbody tr:hover {
+  background: #3a3a3a;
+}
+
+body.dark-theme .port-number {
+  color: #667eea;
+}
+
+body.dark-theme .port-service {
+  color: #b0b0b0;
+}
+
+body.dark-theme .port-version {
+  color: #9ca3af;
+}
+
+body.dark-theme .no-ports {
+  color: #9ca3af;
+}
+
+body.dark-theme .scan-error {
+  color: #ff6b6b;
+}
+
+body.dark-theme .tooltip-footer {
+  border-top-color: #404040;
+  color: #9ca3af;
+}
+
