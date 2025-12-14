@@ -13,7 +13,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState('hosts');
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [autoRefresh, setAutoRefresh] = useState(false);
   const [scanResults, setScanResults] = useState({});
   const [scanning, setScanning] = useState({});
   const [showTooltip, setShowTooltip] = useState({});
@@ -22,10 +22,31 @@ function App() {
   const [rescanStatus, setRescanStatus] = useState('idle');
   const [rescanError, setRescanError] = useState(null);
   const [sortConfig, setSortConfig] = useState({ column: 'ip_address', direction: 'asc' });
+  const [osFilter, setOsFilter] = useState(null);
   const [fingerprints, setFingerprints] = useState([]);
   const [fingerprintsLoading, setFingerprintsLoading] = useState(false);
   const [fingerprintInputs, setFingerprintInputs] = useState({});
   const [fingerprintError, setFingerprintError] = useState(null);
+  const [fingerprintSuccess, setFingerprintSuccess] = useState(null);
+  const [showLogs, setShowLogs] = useState(false);
+  const [logs, setLogs] = useState([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [darkMode, setDarkMode] = useState(() => {
+    // Check localStorage for saved theme preference
+    const saved = localStorage.getItem('darkMode');
+    return saved ? JSON.parse(saved) : false;
+  });
+
+  useEffect(() => {
+    // Apply theme to document body
+    if (darkMode) {
+      document.body.classList.add('dark-theme');
+    } else {
+      document.body.classList.remove('dark-theme');
+    }
+    // Save preference to localStorage
+    localStorage.setItem('darkMode', JSON.stringify(darkMode));
+  }, [darkMode]);
 
   useEffect(() => {
     fetchData();
@@ -42,6 +63,7 @@ function App() {
   }, [activeTab]);
 
   const fetchData = async () => {
+    setLoading(true);
     const newErrors = [];
     const fallbackConfig = { os_fingerprinting_enabled: true, port_scanning_enabled: true };
 
@@ -57,6 +79,7 @@ function App() {
       }
     };
 
+    // Fetch all data in parallel for faster loading
     const [hostsData, eventsData, statsData, configData] = await Promise.all([
       safeFetch('hosts', () => axios.get(`${API_URL}/api/hosts`)),
       safeFetch('events', () => axios.get(`${API_URL}/api/events?limit=50`)),
@@ -64,6 +87,7 @@ function App() {
       safeFetch('config', () => axios.get(`${API_URL}/api/config`))
     ]);
 
+    // Update state
     if (hostsData) setHosts(hostsData);
     if (eventsData) setEvents(eventsData);
     if (statsData) setStats(statsData);
@@ -154,13 +178,32 @@ function App() {
   };
 
   const filteredHosts = hosts.filter(host => {
-    if (!searchQuery) return true;
-    const query = searchQuery.toLowerCase();
-    return (
-      host.ip_address.toLowerCase().includes(query) ||
-      host.mac_address.toLowerCase().includes(query) ||
-      (host.hostname && host.hostname.toLowerCase().includes(query))
-    );
+    // Apply search query filter
+    if (searchQuery) {
+      const query = searchQuery.toLowerCase();
+      const matchesSearch = (
+        host.ip_address.toLowerCase().includes(query) ||
+        host.mac_address.toLowerCase().includes(query) ||
+        (host.hostname && host.hostname.toLowerCase().includes(query))
+      );
+      if (!matchesSearch) return false;
+    }
+    
+    // Apply OS filter
+    if (osFilter) {
+      const hostOs = host.os_fingerprint || 'Unknown';
+      // Normalize OS names for comparison (case-insensitive, handle variations)
+      const normalizeOs = (os) => os.toLowerCase().trim();
+      const normalizedFilter = normalizeOs(osFilter);
+      const normalizedHostOs = normalizeOs(hostOs);
+      
+      // Check if host OS matches filter (exact match or contains)
+      if (normalizedHostOs !== normalizedFilter && !normalizedHostOs.includes(normalizedFilter)) {
+        return false;
+      }
+    }
+    
+    return true;
   });
 
   const ipToNum = (ip) => {
@@ -184,9 +227,22 @@ function App() {
         case 'os_fingerprint':
           return host.os_fingerprint || '';
         case 'age':
-          return host.age || '';
+          // Parse age string to comparable value (e.g., "2h 30m" -> minutes)
+          const parseAge = (ageStr) => {
+            if (!ageStr) return 0;
+            let totalMinutes = 0;
+            const hourMatch = ageStr.match(/(\d+)h/);
+            const minMatch = ageStr.match(/(\d+)m/);
+            const dayMatch = ageStr.match(/(\d+)d/);
+            if (dayMatch) totalMinutes += parseInt(dayMatch[1]) * 24 * 60;
+            if (hourMatch) totalMinutes += parseInt(hourMatch[1]) * 60;
+            if (minMatch) totalMinutes += parseInt(minMatch[1]);
+            return totalMinutes;
+          };
+          return parseAge(host.age);
         case 'status':
-          return host.status || '';
+          // Status column is not sortable
+          return '';
         default:
           return '';
       }
@@ -274,12 +330,50 @@ function App() {
               🔄 Refresh
             </button>
             <button
+              onClick={async () => {
+                if (!showLogs) {
+                  setShowLogs(true);
+                  setLogsLoading(true);
+                  try {
+                    const res = await axios.get(`${API_URL}/api/logs`, { timeout: 5000 });
+                    if (res.data && res.data.logs) {
+                      setLogs(res.data.logs);
+                    } else {
+                      setLogs(['No logs data received from server']);
+                    }
+                  } catch (err) {
+                    console.error('Error loading logs:', err);
+                    setLogs([
+                      `Error loading logs: ${err.message}`,
+                      err.response ? `Status: ${err.response.status}` : '',
+                      'Check browser console for details'
+                    ].filter(Boolean));
+                  } finally {
+                    setLogsLoading(false);
+                  }
+                } else {
+                  setShowLogs(false);
+                }
+              }}
+              className="btn-refresh"
+              title="View backend container logs"
+            >
+              📋 Logs
+            </button>
+            <button
               onClick={triggerFingerprintRescan}
               className="btn-refresh"
               disabled={rescanStatus === 'started' || rescanStatus === 'in_progress'}
               title="Re-run OS fingerprinting for all hosts"
             >
               🛰️ Rescan fingerprints
+            </button>
+            <button
+              onClick={() => setDarkMode(!darkMode)}
+              className="btn-refresh"
+              title={darkMode ? "Switch to light theme" : "Switch to dark theme"}
+            >
+              {darkMode ? "☀️ Light" : "🌙 Dark"}
             </button>
             {(rescanStatus === 'started' || rescanStatus === 'in_progress') && (
               <span className="rescan-status">Rescanning fingerprints…</span>
@@ -288,6 +382,26 @@ function App() {
           </div>
         </div>
       </header>
+
+      {showLogs && (
+        <div className="log-viewer">
+          <div className="log-viewer-wrapper">
+            <div className="log-viewer-header">
+              <h3>Backend Logs (Last 100 lines)</h3>
+              <button className="log-close-btn" onClick={() => setShowLogs(false)}>×</button>
+            </div>
+            <div className="log-viewer-content">
+              {logsLoading ? (
+                <div className="loading" style={{color: '#d4d4d4'}}>Loading logs...</div>
+              ) : (
+                <pre className="log-content">
+                  {logs.length > 0 ? logs.join('\n') : 'No logs available'}
+                </pre>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {errors.length > 0 && (
         <div className="error-banner">
@@ -323,7 +437,7 @@ function App() {
           {stats.os_distribution && Object.keys(stats.os_distribution).length > 0 && (
             <div className="os-chart-container">
               <div className="os-chart-card">
-                <h3>OS Distribution</h3>
+                <h3>OS Distribution {osFilter && <span className="filter-badge">Filtered: {osFilter}</span>}</h3>
                 <ResponsiveContainer width="100%" height={300}>
                   <BarChart
                     layout="vertical"
@@ -336,9 +450,23 @@ function App() {
                     <XAxis type="number" />
                     <YAxis dataKey="name" type="category" width={100} />
                     <Tooltip />
-                    <Bar dataKey="value" fill="#667eea" radius={[0, 8, 8, 0]}>
+                    <Bar 
+                      dataKey="value" 
+                      fill="#667eea" 
+                      radius={[0, 8, 8, 0]}
+                      onClick={(data) => {
+                        if (data && data.name) {
+                          setOsFilter(data.name);
+                        }
+                      }}
+                      style={{ cursor: 'pointer' }}
+                    >
                       {Object.entries(stats.os_distribution).map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={['#667eea', '#764ba2', '#f093fb', '#4facfe', '#43e97b', '#fa709a'][index % 6]} />
+                        <Cell 
+                          key={`cell-${index}`} 
+                          fill={['#667eea', '#764ba2', '#f093fb', '#4facfe', '#43e97b', '#fa709a'][index % 6]}
+                          style={{ cursor: 'pointer' }}
+                        />
                       ))}
                     </Bar>
                   </BarChart>
@@ -381,6 +509,18 @@ function App() {
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="search-input"
               />
+              {(searchQuery || osFilter) && (
+                <button
+                  onClick={() => {
+                    setSearchQuery('');
+                    setOsFilter(null);
+                  }}
+                  className="btn-clear-filters"
+                  title="Clear all filters"
+                >
+                  ✕ Clear Filters
+                </button>
+              )}
             </div>
             {loading ? (
               <div className="loading">Loading...</div>
@@ -406,8 +546,8 @@ function App() {
                       <th onClick={() => toggleSort('age')} className="sortable">
                         Age {sortConfig.column === 'age' ? (sortConfig.direction === 'asc' ? '▲' : '▼') : ''}
                       </th>
-                      <th onClick={() => toggleSort('status')} className="sortable">
-                        Status {sortConfig.column === 'status' ? (sortConfig.direction === 'asc' ? '▲' : '▼') : ''}
+                      <th>
+                        Status
                       </th>
                     </tr>
                   </thead>
@@ -546,6 +686,7 @@ function App() {
         {activeTab === 'fingerprints' && (
           <div className="tab-content">
             {fingerprintError && <div className="error-banner">Error: {fingerprintError}</div>}
+            {fingerprintSuccess && <div className="success-banner">✓ {fingerprintSuccess}</div>}
             {fingerprintsLoading ? (
               <div className="loading">Loading fingerprints...</div>
             ) : fingerprints.length === 0 ? (
@@ -584,14 +725,29 @@ function App() {
                               className="btn-scan"
                               onClick={async () => {
                                 try {
+                                  setFingerprintError(null);
+                                  setFingerprintSuccess(null);
                                   await axios.post(`${API_URL}/api/fingerprints/${host.ip_address}`, {
                                     os_fingerprint: fingerprintInputs[host.ip_address] || ''
                                   });
-                                  // Refresh data and list
-                                  fetchData();
+                                  // Show success feedback
+                                  setFingerprintSuccess(`Fingerprint saved for ${formatIpAddress(host.ip_address)}`);
+                                  // Clear the input field
+                                  setFingerprintInputs(prev => {
+                                    const updated = { ...prev };
+                                    delete updated[host.ip_address];
+                                    return updated;
+                                  });
+                                  // Refresh fingerprints list immediately
                                   fetchFingerprints();
+                                  // Delay full data refresh to allow user to see success message
+                                  setTimeout(() => {
+                                    fetchData();
+                                    setFingerprintSuccess(null);
+                                  }, 2000);
                                 } catch (err) {
                                   setFingerprintError(err?.response?.data?.detail || err.message || 'Failed to save fingerprint');
+                                  setFingerprintSuccess(null);
                                 }
                               }}
                               disabled={!fingerprintInputs[host.ip_address]}
@@ -612,7 +768,7 @@ function App() {
       </div>
 
       <footer className="app-footer">
-        <p>Arpwatch Web UI v0.2.5 | Network Monitoring Dashboard</p>
+        <p>Arpwatch Web UI v0.2.6 | Network Monitoring Dashboard</p>
       </footer>
     </div>
   );

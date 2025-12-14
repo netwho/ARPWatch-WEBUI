@@ -11,8 +11,35 @@ import subprocess
 from pathlib import Path
 import time
 import threading
+import sys
+from collections import deque
+from datetime import datetime
 
-app = FastAPI(title="Arpwatch API", version="0.2.5")
+app = FastAPI(title="Arpwatch API", version="0.2.6")
+
+# In-memory log buffer to capture application logs
+LOG_BUFFER = deque(maxlen=500)  # Keep last 500 log entries
+
+class LogCapture:
+    """Capture stdout/stderr to buffer"""
+    def __init__(self, original_stream, prefix=""):
+        self.original_stream = original_stream
+        self.prefix = prefix
+    
+    def write(self, message):
+        if message.strip():  # Only log non-empty messages
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            log_entry = f"[{timestamp}] {self.prefix}{message.rstrip()}"
+            LOG_BUFFER.append(log_entry)
+        self.original_stream.write(message)
+        self.original_stream.flush()
+    
+    def flush(self):
+        self.original_stream.flush()
+
+# Redirect stdout and stderr to capture logs
+sys.stdout = LogCapture(sys.stdout)
+sys.stderr = LogCapture(sys.stderr, "[ERROR] ")
 
 # Enable CORS
 app.add_middleware(
@@ -23,11 +50,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add middleware to log requests
+@app.middleware("http")
+async def log_requests(request, call_next):
+    """Log all HTTP requests (only log API endpoints, not static files)"""
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+    # Only log API endpoints to reduce noise
+    if request.url.path.startswith("/api/") and request.url.path != "/api/logs":
+        print(f"{request.method} {request.url.path} - {response.status_code} - {process_time:.3f}s")
+    return response
+
 # Configuration
 ARPWATCH_DATA_DIR = os.getenv("ARPWATCH_DATA_DIR", "/var/lib/arpwatch")
 ARPWATCH_LOG_DIR = os.getenv("ARPWATCH_LOG_DIR", "/var/log/arpwatch")
 ARP_DAT_FILE = os.path.join(ARPWATCH_DATA_DIR, "arp.dat")
 OS_CACHE_FILE = os.path.join(ARPWATCH_DATA_DIR, "os_fingerprint_cache.json")
+DNS_CACHE_FILE = os.path.join(ARPWATCH_DATA_DIR, "dns_hostname_cache.json")
 
 # Feature flags
 ENABLE_OS_FINGERPRINTING = os.getenv("ENABLE_OS_FINGERPRINTING", "true").lower() == "true"
@@ -95,8 +135,91 @@ def get_cached_os(ip_address: str) -> Optional[str]:
         return os_cache[ip_address].get("os")
     return None
 
-# Load cache on startup
+# DNS hostname cache
+dns_cache: Dict[str, str] = {}
+
+def load_dns_cache():
+    """Load DNS hostname cache from file"""
+    global dns_cache
+    if os.path.exists(DNS_CACHE_FILE):
+        try:
+            with open(DNS_CACHE_FILE, 'r') as f:
+                dns_cache = json.load(f)
+        except Exception as e:
+            print(f"Error loading DNS cache: {e}")
+            dns_cache = {}
+
+def save_dns_cache():
+    """Save DNS hostname cache to file"""
+    try:
+        with open(DNS_CACHE_FILE, 'w') as f:
+            json.dump(dns_cache, f, indent=2)
+    except Exception as e:
+        print(f"Error saving DNS cache: {e}")
+
+def get_cached_hostname(ip_address: str) -> Optional[str]:
+    """Return cached hostname without performing DNS lookup"""
+    cached = dns_cache.get(ip_address)
+    # Return None if cache has empty string (failed lookup) or None
+    return cached if cached else None
+
+def get_hostname_with_cache(ip_address: str, force_lookup: bool = False) -> Optional[str]:
+    """Get hostname from cache or perform DNS lookup if not cached or forced"""
+    try:
+        # Check cache first
+        if not force_lookup and ip_address in dns_cache:
+            cached = dns_cache[ip_address]
+            return cached if cached else None
+        
+        # Only perform DNS lookup if forced (for new/changed hosts)
+        if force_lookup:
+            try:
+                print(f"Performing DNS lookup for {ip_address}...")
+                hostname = reverse_dns_lookup(ip_address, timeout=1)
+                # Cache the result (even if None, to avoid repeated failed lookups)
+                dns_cache[ip_address] = hostname if hostname else ""
+                try:
+                    save_dns_cache()
+                except Exception as e:
+                    print(f"[ERROR] Error saving DNS cache: {e}")
+                if hostname:
+                    print(f"DNS lookup successful: {ip_address} -> {hostname}")
+                else:
+                    print(f"DNS lookup failed for {ip_address} (no hostname)")
+                return hostname
+            except Exception as e:
+                print(f"[ERROR] Error in DNS lookup for {ip_address}: {e}")
+                # Cache failure to avoid repeated attempts
+                dns_cache[ip_address] = ""
+                try:
+                    save_dns_cache()
+                except:
+                    pass
+                return None
+        
+        return None
+    except Exception as e:
+        print(f"Error in get_hostname_with_cache for {ip_address}: {e}")
+        return None
+
+# Load caches on startup
 load_os_cache()
+load_dns_cache()
+
+@app.on_event("startup")
+async def startup_event():
+    """Log startup information"""
+    print("=" * 60)
+    print("Arpwatch API Server Starting")
+    print("=" * 60)
+    print(f"OS Fingerprinting: {'Enabled' if ENABLE_OS_FINGERPRINTING else 'Disabled'}")
+    print(f"Port Scanning: {'Enabled' if ENABLE_PORT_SCANNING else 'Disabled'}")
+    print(f"ARP Data File: {ARP_DAT_FILE}")
+    print(f"OS Cache: {len(os_cache)} entries loaded")
+    print(f"DNS Cache: {len(dns_cache)} entries loaded")
+    print("=" * 60)
+    print("Server ready and listening on port 8000")
+    print("=" * 60)
 
 class ARPEntry(BaseModel):
     ip_address: str
@@ -133,13 +256,17 @@ class PortScanResult(BaseModel):
 class FingerprintUpdate(BaseModel):
     os_fingerprint: str
 
-def reverse_dns_lookup(ip_address):
-    """Perform reverse DNS lookup for an IP address"""
+def reverse_dns_lookup(ip_address, timeout=2):
+    """Perform reverse DNS lookup for an IP address with timeout"""
+    old_timeout = socket.getdefaulttimeout()
     try:
+        socket.setdefaulttimeout(timeout)
         hostname, _, _ = socket.gethostbyaddr(ip_address)
         return hostname
-    except (socket.herror, socket.gaierror, OSError):
+    except (socket.herror, socket.gaierror, OSError, socket.timeout):
         return None
+    finally:
+        socket.setdefaulttimeout(old_timeout)
 
 def os_fingerprint(ip_address: str, force: bool = False) -> Optional[str]:
     """Perform OS fingerprinting using nmap (cached, with optional retries)"""
@@ -452,6 +579,16 @@ def parse_arp_dat():
     if not os.path.exists(ARP_DAT_FILE):
         return entries
     
+    # Check file size to prevent reading very large files
+    try:
+        file_size = os.path.getsize(ARP_DAT_FILE)
+        if file_size > 5 * 1024 * 1024:  # 5MB limit
+            print(f"[WARNING] arp.dat file is very large ({file_size / 1024 / 1024:.2f} MB), may cause performance issues")
+        else:
+            print(f"Reading arp.dat file ({file_size / 1024:.2f} KB)")
+    except Exception as e:
+        print(f"[ERROR] Error checking arp.dat file size: {e}")
+    
     # Get file modification time as fallback for age calculation
     try:
         file_mtime = os.path.getmtime(ARP_DAT_FILE)
@@ -460,7 +597,7 @@ def parse_arp_dat():
         file_timestamp = None
     
     try:
-        with open(ARP_DAT_FILE, 'r') as f:
+        with open(ARP_DAT_FILE, 'r', errors='ignore') as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith('#'):
@@ -504,7 +641,7 @@ def parse_arp_dat():
                     if not is_ip_address(ip):
                         continue
                     
-                    # Get hostname from file or reverse DNS
+                    # Get hostname from file or cache (don't do DNS lookup here to avoid noise)
                     hostname = None
                     if len(parts) > 2:
                         # Check if third part is a hostname (not a timestamp)
@@ -512,13 +649,15 @@ def parse_arp_dat():
                         if not re.match(r'^\d+$', potential_hostname):  # Not just digits
                             hostname = potential_hostname
                     
-                    # If no hostname, try reverse DNS (with timeout to avoid hanging)
+                    # If no hostname in file, check cache (but don't do DNS lookup here)
                     if not hostname:
-                        try:
-                            socket.setdefaulttimeout(2)  # 2 second timeout
-                            hostname = reverse_dns_lookup(ip)
-                        except:
-                            pass
+                        cached_hostname = get_cached_hostname(ip)
+                        if cached_hostname:
+                            hostname = cached_hostname
+                        # If cache has empty string, it means we tried before and failed - skip
+                        elif ip in dns_cache and dns_cache[ip] == "":
+                            hostname = None  # Known to have no hostname
+                        # Otherwise, leave as None - DNS lookup will happen only for new/changed hosts
                     
                     # Try to extract timestamp from line (arpwatch sometimes includes it)
                     line_timestamp = None
@@ -550,60 +689,97 @@ def parse_log_files():
 
     # If the log directory is missing or unreadable, bail out gracefully
     if not os.path.exists(ARPWATCH_LOG_DIR):
+        print(f"[WARNING] ARP log directory does not exist: {ARPWATCH_LOG_DIR}")
         return events
 
+    print(f"Scanning log directory: {ARPWATCH_LOG_DIR}")
     try:
         log_files = [
             os.path.join(ARPWATCH_LOG_DIR, f)
             for f in os.listdir(ARPWATCH_LOG_DIR)
             if os.path.isfile(os.path.join(ARPWATCH_LOG_DIR, f)) and f.endswith('.log')
         ]
+        if log_files:
+            print(f"Found {len(log_files)} log file(s) in {ARPWATCH_LOG_DIR}")
+        else:
+            print(f"No .log files found in {ARPWATCH_LOG_DIR}")
     except Exception as e:
-        print(f"Error reading log directory {ARPWATCH_LOG_DIR}: {e}")
+        print(f"[ERROR] Error reading log directory {ARPWATCH_LOG_DIR}: {e}")
         log_files = []
     
     # Also check syslog if available
     syslog_path = "/var/log/syslog"
     if os.path.exists(syslog_path):
+        print(f"Also checking syslog: {syslog_path}")
         log_files.append(syslog_path)
     
     for log_file in log_files:
         try:
-            with open(log_file, 'r') as f:
-                for line in f:
-                    # Parse arpwatch log entries
-                    # Format: timestamp hostname arpwatch: message
-                    if 'arpwatch' in line.lower():
-                        # Try to extract timestamp, IP, MAC, and event type
-                        match = re.search(r'(\w+\s+\d+\s+\d+:\d+:\d+).*?arpwatch[:\s]+(.*)', line, re.IGNORECASE)
-                        if match:
-                            timestamp = match.group(1)
-                            message = match.group(2)
-                            
-                            # Extract IP and MAC from message
-                            ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', message)
-                            mac_match = re.search(r'([0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2})', message, re.IGNORECASE)
-                            
-                            event_type = "info"
-                            if "new station" in message.lower():
-                                event_type = "new"
-                            elif "changed ethernet" in message.lower():
-                                event_type = "changed"
-                            elif "flip flop" in message.lower():
-                                event_type = "flip-flop"
-                            
-                            events.append({
-                                "timestamp": timestamp,
-                                "event_type": event_type,
-                                "ip_address": ip_match.group(1) if ip_match else "unknown",
-                                "mac_address": mac_match.group(1) if mac_match else "unknown",
-                                "message": message
-                            })
+            # Skip very large files to prevent timeouts (limit to 10MB)
+            try:
+                file_size = os.path.getsize(log_file)
+                if file_size > 10 * 1024 * 1024:  # 10MB
+                    print(f"Skipping large log file {log_file} ({file_size} bytes)")
+                    continue
+            except:
+                pass
+            
+            # Read only last 1000 lines to prevent memory issues
+            try:
+                with open(log_file, 'r', errors='ignore') as f:
+                    lines = f.readlines()
+                    # Only process last 1000 lines
+                    lines = lines[-1000:] if len(lines) > 1000 else lines
+                    for line in lines:
+                        # Parse arpwatch log entries
+                        # Format: timestamp hostname arpwatch: message
+                        if 'arpwatch' in line.lower():
+                            # Try to extract timestamp, IP, MAC, and event type
+                            match = re.search(r'(\w+\s+\d+\s+\d+:\d+:\d+).*?arpwatch[:\s]+(.*)', line, re.IGNORECASE)
+                            if match:
+                                timestamp = match.group(1)
+                                message = match.group(2)
+                                
+                                # Extract IP and MAC from message
+                                ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', message)
+                                mac_match = re.search(r'([0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2})', message, re.IGNORECASE)
+                                
+                                event_type = "info"
+                                if "new station" in message.lower():
+                                    event_type = "new"
+                                elif "changed ethernet" in message.lower():
+                                    event_type = "changed"
+                                elif "flip flop" in message.lower():
+                                    event_type = "flip-flop"
+                                
+                                events.append({
+                                    "timestamp": timestamp,
+                                    "event_type": event_type,
+                                    "ip_address": ip_match.group(1) if ip_match else "unknown",
+                                    "mac_address": mac_match.group(1) if mac_match else "unknown",
+                                    "message": message
+                                })
+            except Exception as e:
+                print(f"Error reading log file {log_file}: {e}")
+                continue
         except Exception as e:
             print(f"Error parsing log file {log_file}: {e}")
+            continue
     
     # Sort by timestamp (most recent first)
     events.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    if events:
+        print(f"✓ Parsed {len(events)} events from log files")
+        # Log summary of event types
+        event_types = {}
+        for event in events[:20]:  # Check first 20 events
+            event_type = event.get("event_type", "unknown")
+            event_types[event_type] = event_types.get(event_type, 0) + 1
+        if event_types:
+            type_summary = ", ".join([f"{k}: {v}" for k, v in event_types.items()])
+            print(f"  Recent event types: {type_summary}")
+    else:
+        print("  No events found in log files")
     return events[:100]  # Return last 100 events
 
 def get_last_seen_timestamps():
@@ -625,7 +801,7 @@ def get_last_seen_timestamps():
 async def root():
     return {
         "message": "Arpwatch API", 
-        "version": "0.2.5",
+        "version": "0.2.6",
         "features": {
             "os_fingerprinting": ENABLE_OS_FINGERPRINTING,
             "port_scanning": ENABLE_PORT_SCANNING,
@@ -636,41 +812,98 @@ async def root():
 @app.get("/api/hosts", response_model=List[ARPEntry])
 def get_hosts():
     """Get all ARP entries with OS fingerprinting and age"""
-    entries = parse_arp_dat()
-    last_seen_map = get_last_seen_timestamps()
+    try:
+        entries = parse_arp_dat()
+    except Exception as e:
+        print(f"Error parsing arp.dat in get_hosts: {e}")
+        entries = {}
+    
+    try:
+        last_seen_map = get_last_seen_timestamps()
+    except Exception as e:
+        print(f"Error getting last seen timestamps: {e}")
+        last_seen_map = {}
+    
+    # Get recent events to identify new/changed hosts that need DNS lookup
+    try:
+        recent_events = parse_log_files()
+        new_or_changed_ips = set()
+        for event in recent_events[:50]:  # Check last 50 events
+            event_type = event.get("event_type", "")
+            if event_type in ["new", "changed"]:
+                ip = event.get("ip_address")
+                if ip and ip != "unknown":
+                    new_or_changed_ips.add(ip)
+        if new_or_changed_ips:
+            print(f"Found {len(new_or_changed_ips)} new/changed hosts requiring DNS lookup")
+    except Exception as e:
+        print(f"[ERROR] Error parsing log files in get_hosts: {e}")
+        new_or_changed_ips = set()
     
     result = []
     for ip, entry in entries.items():
-        # Skip excluded IP ranges (e.g., VPN ranges)
-        if should_exclude_ip(ip):
+        try:
+            # Skip excluded IP ranges (e.g., VPN ranges)
+            if should_exclude_ip(ip):
+                continue
+            
+            # Get hostname - use cached or perform DNS lookup only for new/changed hosts
+            hostname = entry.get("hostname")
+            if not hostname and ip in new_or_changed_ips:
+                try:
+                    # Only do DNS lookup for new/changed hosts that aren't in cache
+                    hostname = get_hostname_with_cache(ip, force_lookup=True)
+                    if hostname:
+                        print(f"DNS lookup for {ip}: {hostname}")
+                    else:
+                        print(f"DNS lookup for {ip}: no hostname found")
+                except Exception as e:
+                    print(f"[ERROR] Error doing DNS lookup for {ip}: {e}")
+                    hostname = None
+            
+            # Get last seen timestamp - prefer log events, fallback to file timestamp
+            last_seen = last_seen_map.get(ip)
+            if not last_seen:
+                # Use timestamp from arp.dat file (file modification time or line timestamp)
+                last_seen = entry.get("file_timestamp")
+            
+            # Calculate age
+            try:
+                age = format_age(last_seen) if last_seen else None
+            except Exception as e:
+                print(f"Error formatting age for {ip}: {e}")
+                age = None
+            
+            # Get OS fingerprint from cache only (don't trigger new scans to avoid timeouts)
+            try:
+                os_info = get_cached_os(ip)
+            except Exception as e:
+                print(f"Error getting cached OS for {ip}: {e}")
+                os_info = None
+            
+            # Determine status based on inactivity
+            try:
+                status = get_inactivity_status(last_seen) if last_seen else entry.get("status", "active")
+            except Exception as e:
+                print(f"Error getting status for {ip}: {e}")
+                status = "active"
+            
+            result.append(ARPEntry(
+                ip_address=entry["ip_address"],
+                mac_address=entry["mac_address"],
+                hostname=hostname,
+                first_seen=None,  # Could be extracted from logs if needed
+                last_seen=last_seen,
+                age=age,
+                os_fingerprint=os_info,
+                status=status
+            ))
+        except Exception as e:
+            print(f"[ERROR] Error processing entry for {ip}: {e}")
             continue
-        
-        # Get last seen timestamp - prefer log events, fallback to file timestamp
-        last_seen = last_seen_map.get(ip)
-        if not last_seen:
-            # Use timestamp from arp.dat file (file modification time or line timestamp)
-            last_seen = entry.get("file_timestamp")
-        
-        # Calculate age
-        age = format_age(last_seen) if last_seen else None
-        
-        # Get OS fingerprint (from cache or run once)
-        os_info = os_fingerprint(ip)
-        
-        # Determine status based on inactivity
-        status = get_inactivity_status(last_seen) if last_seen else entry.get("status", "active")
-        
-        result.append(ARPEntry(
-            ip_address=entry["ip_address"],
-            mac_address=entry["mac_address"],
-            hostname=entry.get("hostname"),
-            first_seen=None,  # Could be extracted from logs if needed
-            last_seen=last_seen,
-            age=age,
-            os_fingerprint=os_info,
-            status=status
-        ))
     
+    print(f"✓ Returning {len(result)} host entries")
+    print("=" * 60)
     return result
 
 @app.get("/api/hosts/{ip_address}", response_model=ARPEntry)
@@ -684,15 +917,33 @@ def get_host(ip_address: str):
 @app.get("/api/events", response_model=List[ARPEvent])
 def get_events(limit: int = 100):
     """Get recent ARP events"""
-    events = parse_log_files()
-    return events[:limit]
+    try:
+        events = parse_log_files()
+        return events[:limit]
+    except Exception as e:
+        print(f"Error getting events: {e}")
+        return []
 
 @app.get("/api/stats", response_model=Stats)
 def get_stats():
     """Get statistics about ARP entries including OS distribution"""
-    entries = parse_arp_dat()
-    events = parse_log_files()
-    last_seen_map = get_last_seen_timestamps()
+    try:
+        entries = parse_arp_dat()
+    except Exception as e:
+        print(f"Error parsing arp.dat in get_stats: {e}")
+        entries = {}
+    
+    try:
+        events = parse_log_files()
+    except Exception as e:
+        print(f"Error parsing log files in get_stats: {e}")
+        events = []
+    
+    try:
+        last_seen_map = get_last_seen_timestamps()
+    except Exception as e:
+        print(f"Error getting last seen timestamps in get_stats: {e}")
+        last_seen_map = {}
     
     active_hosts = len(entries)
     new_hosts = len([e for e in events if e.get("event_type") == "new"])
@@ -700,16 +951,23 @@ def get_stats():
     
     # Calculate OS distribution
     os_distribution = {}
-    for ip in entries.keys():
-        # Get OS from cache (don't trigger new scans)
-        if ip in os_cache:
-            os_info = os_cache[ip].get("os")
-            if os_info:
-                # Simplify OS name (e.g., "Linux 3.x" -> "Linux")
-                os_simple = os_info.split()[0] if os_info else "Unknown"
-                os_distribution[os_simple] = os_distribution.get(os_simple, 0) + 1
-        else:
-            os_distribution["Unknown"] = os_distribution.get("Unknown", 0) + 1
+    try:
+        for ip in entries.keys():
+            try:
+                # Get OS from cache (don't trigger new scans)
+                if ip in os_cache:
+                    os_info = os_cache[ip].get("os")
+                    if os_info:
+                        # Simplify OS name (e.g., "Linux 3.x" -> "Linux")
+                        os_simple = os_info.split()[0] if os_info else "Unknown"
+                        os_distribution[os_simple] = os_distribution.get(os_simple, 0) + 1
+                else:
+                    os_distribution["Unknown"] = os_distribution.get("Unknown", 0) + 1
+            except Exception as e:
+                print(f"Error processing OS for {ip} in stats: {e}")
+                os_distribution["Unknown"] = os_distribution.get("Unknown", 0) + 1
+    except Exception as e:
+        print(f"Error calculating OS distribution: {e}")
     
     return Stats(
         total_hosts=active_hosts,
@@ -826,57 +1084,69 @@ def os_rescan_status():
 @app.get("/api/config")
 def get_config():
     """Get API configuration and feature flags"""
-    return {
-        "os_fingerprinting_enabled": ENABLE_OS_FINGERPRINTING,
-        "port_scanning_enabled": ENABLE_PORT_SCANNING,
-        "scan_ports": DEFAULT_SCAN_PORTS,
-        "exclude_ip_ranges": EXCLUDE_IP_RANGES
-    }
+    try:
+        return {
+            "os_fingerprinting_enabled": ENABLE_OS_FINGERPRINTING,
+            "port_scanning_enabled": ENABLE_PORT_SCANNING,
+            "scan_ports": DEFAULT_SCAN_PORTS,
+            "exclude_ip_ranges": EXCLUDE_IP_RANGES
+        }
+    except Exception as e:
+        print(f"Error getting config: {e}")
+        # Return safe defaults
+        return {
+            "os_fingerprinting_enabled": True,
+            "port_scanning_enabled": True,
+            "scan_ports": [21, 22, 80, 443, 445],
+            "exclude_ip_ranges": []
+        }
 
-@app.get("/api/debug")
-def debug_info():
-    """Debug endpoint to check arpwatch data files"""
-    debug_info = {
-        "arp_dat_exists": os.path.exists(ARP_DAT_FILE),
-        "arp_dat_path": ARP_DAT_FILE,
-        "data_dir_exists": os.path.exists(ARPWATCH_DATA_DIR),
-        "data_dir": ARPWATCH_DATA_DIR,
-        "log_dir_exists": os.path.exists(ARPWATCH_LOG_DIR),
-        "log_dir": ARPWATCH_LOG_DIR,
-    }
-    
-    if os.path.exists(ARP_DAT_FILE):
+@app.get("/api/logs")
+def get_logs():
+    """Get last 100 lines of backend application logs"""
+    try:
+        # Get logs from in-memory buffer
+        log_lines = list(LOG_BUFFER)[-100:]  # Get last 100 entries
+        
+        if log_lines:
+            return {"logs": log_lines}
+        
+        # If buffer is empty, add a message and try to get docker logs as fallback
+        log_lines = [
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Log buffer is empty.",
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Attempting to fetch docker logs..."
+        ]
+        
         try:
-            stat = os.stat(ARP_DAT_FILE)
-            debug_info["arp_dat_size"] = stat.st_size
-            debug_info["arp_dat_modified"] = datetime.fromtimestamp(stat.st_mtime).isoformat()
-            
-            # Read first few lines
-            with open(ARP_DAT_FILE, 'r') as f:
-                lines = f.readlines()[:10]
-                debug_info["arp_dat_preview"] = [line.strip() for line in lines]
+            import subprocess
+            result = subprocess.run(
+                ["docker", "logs", "--tail", "20", "arpwatch-backend", "2>&1"],
+                capture_output=True,
+                text=True,
+                timeout=3
+            )
+            if result.stdout:
+                docker_logs = result.stdout.strip().split('\n')
+                if docker_logs:
+                    log_lines.extend(docker_logs[-18:])  # Add docker logs, keeping first 2 messages
+                    return {"logs": log_lines}
         except Exception as e:
-            debug_info["arp_dat_error"] = str(e)
-    
-    if os.path.exists(ARPWATCH_DATA_DIR):
-        try:
-            files = os.listdir(ARPWATCH_DATA_DIR)
-            debug_info["data_dir_files"] = files
-        except Exception as e:
-            debug_info["data_dir_error"] = str(e)
-    
-    if os.path.exists(ARPWATCH_LOG_DIR):
-        try:
-            files = os.listdir(ARPWATCH_LOG_DIR)
-            debug_info["log_dir_files"] = files
-        except Exception as e:
-            debug_info["log_dir_error"] = str(e)
-    
-    # Try to parse and show count
-    entries = parse_arp_dat()
-    debug_info["parsed_entries_count"] = len(entries)
-    
-    return debug_info
+            log_lines.append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Error fetching docker logs: {str(e)}")
+        
+        # Return message if no logs available
+        log_lines.extend([
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] No logs available yet.",
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Logs will appear here as the application processes requests.",
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Total log buffer size: {len(LOG_BUFFER)} entries"
+        ])
+        return {"logs": log_lines}
+    except Exception as e:
+        return {
+            "logs": [
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ERROR] Error retrieving logs: {str(e)}",
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Check container logs manually: docker logs arpwatch-backend"
+            ]
+        }
 
 if __name__ == "__main__":
     import uvicorn

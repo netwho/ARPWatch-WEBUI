@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2025-12-13
+
+### Changed
+- Auto-refresh disabled by default (can be enabled via toggle)
+- Auto-refresh toggle styled as normal text with transparent background
+- Improved UI consistency for theme switching and controls
+
+### Fixed
+- Bar chart hover effects removed (no background color change on mouse over)
+- Statistics cards hover effects removed for better readability
+- Tooltip styling improved with dark gray background
+
 ## [0.2.5] - 2025-12-12
 
 - Version bump to v0.2.5.

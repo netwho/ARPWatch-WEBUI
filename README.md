@@ -1,7 +1,7 @@
 # Arpwatch Web UI
 
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.5-blue.svg)](VERSION)
+[![Version](https://img.shields.io/badge/version-0.2.6-blue.svg)](VERSION)
 [![Docker](https://img.shields.io/badge/Docker-20.10%2B-2496ED.svg?logo=docker)](https://www.docker.com/)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg?logo=python)](https://www.python.org/)
 [![React](https://img.shields.io/badge/React-18.2%2B-61DAFB.svg?logo=react)](https://react.dev/)
