@@ -1,7 +1,7 @@
 # Arpwatch Web UI
 
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](VERSION)
+[![Version](https://img.shields.io/badge/version-0.3.1-blue.svg)](VERSION)
 [![Docker](https://img.shields.io/badge/Docker-20.10%2B-2496ED.svg?logo=docker)](https://www.docker.com/)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg?logo=python)](https://www.python.org/)
 [![React](https://img.shields.io/badge/React-18.2%2B-61DAFB.svg?logo=react)](https://react.dev/)
@@ -48,6 +48,8 @@ Replace `ens18` with your network interface name. See [HOST_SETUP.md](HOST_SETUP
 ```bash
 docker compose up -d --build
 ```
+
+Note: The backend expects to read arpwatch events from host logs. The compose file mounts `/var/log/syslog` into the backend container; if your system stores syslog elsewhere (or only journals), update the volume in `docker-compose.yml` accordingly or export arpwatch logs to a file under `/var/log/arpwatch`.
 
 ### Step 3: Access the Web UI
 

@@ -1,11 +1,13 @@
 #!/bin/bash
 # Arpwatch installation and setup script for Debian/Ubuntu
 
-set -e
+set -euo pipefail
 
 INTERFACE=${1:-ens18}
 ARPWATCH_DATA_DIR="/var/lib/arpwatch"
 ARPWATCH_LOG_DIR="/var/log/arpwatch"
+WRAPPER_PATH="/usr/local/bin/arpwatch-wrapper.sh"
+SERVICE_PATH="/etc/systemd/system/arpwatch.service"
 
 echo "=== Arpwatch Host Installation ==="
 echo "Interface: $INTERFACE"
@@ -15,6 +17,30 @@ echo ""
 if [ "$EUID" -ne 0 ]; then 
     echo "Please run as root (use sudo)"
     exit 1
+fi
+
+# Warn/optionally remove an existing install so we can replace the wrapper/service
+EXISTING=0
+if systemctl list-unit-files 2>/dev/null | grep -q '^arpwatch\.service'; then EXISTING=1; fi
+if systemctl status arpwatch 2>/dev/null | grep -q 'Loaded:'; then EXISTING=1; fi
+if [ -f "$SERVICE_PATH" ] || [ -x "$WRAPPER_PATH" ]; then EXISTING=1; fi
+
+if [ "$EXISTING" -eq 1 ]; then
+    echo "Existing arpwatch installation detected."
+    read -r -p "Remove existing arpwatch service and wrapper before reinstall? [y/N]: " REMOVE_OLD
+    if [[ "$REMOVE_OLD" =~ ^[Yy]$ ]]; then
+        echo "Stopping and disabling old service (if running)..."
+        systemctl stop arpwatch.service 2>/dev/null || true
+        systemctl disable arpwatch.service 2>/dev/null || true
+        echo "Removing old service definition and wrapper..."
+        rm -f "$SERVICE_PATH"
+        rm -f "$WRAPPER_PATH"
+        systemctl daemon-reload
+        echo "Old arpwatch service removed."
+    else
+        echo "Aborting at user request."
+        exit 0
+    fi
 fi
 
 # Install arpwatch if not already installed
@@ -58,62 +84,47 @@ fi
 
 # Create wrapper script to handle arpwatch daemonization
 echo "Creating wrapper script..."
-cat > /usr/local/bin/arpwatch-wrapper.sh << 'WRAPPER_EOF'
+cat > "$WRAPPER_PATH" << 'WRAPPER_EOF'
 #!/bin/bash
+set -euo pipefail
+
 INTERFACE="$1"
 DATAFILE="$2"
-PIDFILE="/run/arpwatch.pid"
 
-# Ensure data file exists and is writable
+if [ -z "${INTERFACE:-}" ] || [ -z "${DATAFILE:-}" ]; then
+    echo "Usage: $0 <interface> <datafile>" >&2
+    exit 1
+fi
+
+# Ensure data file exists and is owned by arpwatch
+mkdir -p "$(dirname "$DATAFILE")"
 touch "$DATAFILE"
 chown arpwatch:arpwatch "$DATAFILE" 2>/dev/null || true
+chmod 644 "$DATAFILE" 2>/dev/null || true
 
-# Start arpwatch as daemon
-/usr/sbin/arpwatch -i "$INTERFACE" -d -f "$DATAFILE"
-
-# Wait a moment for it to start
-sleep 2
-
-# Find the arpwatch PID and write to PID file
-for i in {1..5}; do
-    PID=$(pgrep -f "arpwatch.*$INTERFACE" | head -1)
-    if [ -n "$PID" ]; then
-        # Write PID file
-        echo "$PID" > "$PIDFILE" 2>/dev/null || true
-        # Keep script running so systemd doesn't think service exited
-        while pgrep -f "arpwatch.*$INTERFACE" > /dev/null; do
-            sleep 5
-        done
-        exit 0
-    fi
-    sleep 1
-done
-echo "ERROR: Arpwatch failed to start"
-exit 1
+# Run arpwatch in the foreground under systemd; -a disables bogon filtering complaints
+exec /usr/sbin/arpwatch -i "$INTERFACE" -d -a -f "$DATAFILE"
 WRAPPER_EOF
-chmod +x /usr/local/bin/arpwatch-wrapper.sh
+chmod +x "$WRAPPER_PATH"
 
 # Create systemd service file
 echo "Creating systemd service..."
-cat > /etc/systemd/system/arpwatch.service << EOF
+cat > "$SERVICE_PATH" << EOF
 [Unit]
 Description=ARPwatch daemon
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=arpwatch
 Group=arpwatch
-ExecStart=/usr/local/bin/arpwatch-wrapper.sh $INTERFACE $ARPWATCH_DATA_DIR/arp.dat
-ExecStop=/bin/kill -TERM \$(cat /run/arpwatch.pid 2>/dev/null) || true
-PIDFile=/run/arpwatch.pid
-RuntimeDirectory=arpwatch
-RuntimeDirectoryMode=0755
-AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
-TimeoutStartSec=10
+ExecStart=$WRAPPER_PATH $INTERFACE $ARPWATCH_DATA_DIR/arp.dat
 Restart=on-failure
 RestartSec=5
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target

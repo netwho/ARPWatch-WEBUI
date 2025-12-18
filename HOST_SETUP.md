@@ -173,5 +173,5 @@ cd ~/arpwatch-ui
 docker compose up -d
 ```
 
-The backend container will automatically read from `/var/lib/arpwatch/arp.dat` on the host.
+The backend container will automatically read from `/var/lib/arpwatch/arp.dat` on the host. To surface event counters, it also needs access to arpwatch log output; by default `docker-compose.yml` mounts `/var/log/syslog` into the backend. If your system uses a different syslog path or only journald, update that volume or export arpwatch logs to a file under `/var/log/arpwatch` so the container can parse them.
 

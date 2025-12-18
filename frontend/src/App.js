@@ -1035,7 +1035,7 @@ function App() {
       </div>
 
       <footer className="app-footer">
-        <p>Arpwatch Web UI v0.3.0 | Network Monitoring Dashboard</p>
+        <p>Arpwatch Web UI v0.3.1 | Network Monitoring Dashboard</p>
       </footer>
     </div>
   );

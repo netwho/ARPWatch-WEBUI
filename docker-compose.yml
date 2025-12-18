@@ -9,6 +9,7 @@ services:
     volumes:
       - /var/lib/arpwatch:/var/lib/arpwatch:rw  # Changed to rw for OS cache file
       - /var/log/arpwatch:/var/log/arpwatch:ro
+      - /var/log/syslog:/var/log/syslog:ro  # Expose host syslog so events are parsed
     environment:
       - ARPWATCH_DATA_DIR=/var/lib/arpwatch
       - ARPWATCH_LOG_DIR=/var/log/arpwatch

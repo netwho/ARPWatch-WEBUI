@@ -16,7 +16,7 @@ import sys
 from collections import deque
 from datetime import datetime
 
-app = FastAPI(title="Arpwatch API", version="0.3.0")
+app = FastAPI(title="Arpwatch API", version="0.3.1")
 
 # In-memory log buffer to capture application logs
 LOG_BUFFER = deque(maxlen=500)  # Keep last 500 log entries
@@ -991,7 +991,7 @@ def cleanup_idle_hosts():
 async def root():
     return {
         "message": "Arpwatch API", 
-        "version": "0.3.0",
+        "version": "0.3.1",
         "features": {
             "os_fingerprinting": ENABLE_OS_FINGERPRINTING,
             "port_scanning": ENABLE_PORT_SCANNING,
