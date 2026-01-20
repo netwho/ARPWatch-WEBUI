@@ -1,0 +1,147 @@
+# All-in-one Docker Compose configuration
+# This is the recommended setup for easy deployment
+# Uses host network mode for arpwatch to directly monitor host interfaces
+#
+# Usage:
+#   1. Find your network interface: ip link show
+#   2. Set interface: export ARPWATCH_INTERFACE=ens18
+#   3. Start: docker compose -f docker-compose.all-in-one.yml up -d
+#
+# Or use default (eth0):
+#   docker compose -f docker-compose.all-in-one.yml up -d
+
+services:
+  # Arpwatch daemon - monitors network interface
+  arpwatch:
+    build:
+      context: ./arpwatch
+      dockerfile: Dockerfile
+    image: arpwatch-webui:arpwatch-latest
+    container_name: arpwatch-daemon
+    network_mode: host  # Direct access to host network interfaces
+    environment:
+      - INTERFACE=${ARPWATCH_INTERFACE:-eth0}  # Override with your interface name
+    volumes:
+      - arpwatch-data:/var/lib/arpwatch:rw
+      - arpwatch-logs:/var/log/arpwatch:rw
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    privileged: true  # Required for raw network packet capture
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pgrep", "-x", "arpwatch"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # FastAPI backend - serves API and processes ARP data
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: arpwatch-webui:backend-latest
+    container_name: arpwatch-backend
+    # No longer exposing port directly - accessed via nginx (or uncomment for direct access)
+    # ports:
+    #   - "8000:8000"
+    expose:
+      - "8000"
+    volumes:
+      - arpwatch-data:/var/lib/arpwatch:ro
+      - arpwatch-logs:/var/log/arpwatch:ro
+      - backend-cache:/tmp:rw  # Writable cache directory for OS fingerprinting
+    environment:
+      - ARPWATCH_DATA_DIR=/var/lib/arpwatch
+      - ARPWATCH_LOG_DIR=/var/log/arpwatch
+      - ENABLE_OS_FINGERPRINTING=true
+      - ENABLE_PORT_SCANNING=true
+      - SCAN_PORTS=21,22,80,443,445
+      # Default excludes link-local addresses (169.254.0.0/16)
+      # Add more ranges: EXCLUDE_IP_RANGES=169.254.0.0/16,192.168.2.0/24
+    cap_add:
+      - NET_RAW  # Required for nmap OS detection
+      - NET_ADMIN
+    depends_on:
+      arpwatch:
+        condition: service_started
+        required: false  # Allow backend to start even if arpwatch isn't ready
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s  # Give backend time to start before checking
+
+  # React frontend - web UI dashboard
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: arpwatch-webui:frontend-latest
+    container_name: arpwatch-frontend
+    # No longer exposing port directly - accessed via nginx (or uncomment for direct access)
+    # ports:
+    #   - "8080:80"
+    expose:
+      - "80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s  # Give frontend time to start before checking
+
+  # Nginx reverse proxy with TLS support
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    image: arpwatch-webui:nginx-latest
+    container_name: arpwatch-nginx
+    ports:
+      - "${HTTP_PORT:-80}:80"   # HTTP (redirects to HTTPS)
+      - "${HTTPS_PORT:-443}:443" # HTTPS
+    volumes:
+      - ./nginx/ssl:/etc/nginx/ssl:ro  # SSL certificates
+      - ./nginx/logs:/var/log/nginx    # Nginx logs
+      - certbot-webroot:/var/www/certbot:ro  # Let's Encrypt webroot
+      # Use custom CA config if CUSTOM_CA=true in .env
+      # Uncomment and modify path if using custom CA certificates:
+      # - ./nginx/nginx-custom-ca.conf:/etc/nginx/conf.d/default.conf:ro
+    environment:
+      # Use custom CA configuration if set to true
+      - CUSTOM_CA=${CUSTOM_CA:-false}
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  arpwatch-data:
+    driver: local
+    name: arpwatch-data
+  arpwatch-logs:
+    driver: local
+    name: arpwatch-logs
+  backend-cache:
+    driver: local
+    name: backend-cache
+  certbot-webroot:
+    driver: local
+    name: certbot-webroot
+
+# Network configuration notes:
+# - Arpwatch uses host network mode for direct interface access
+# - Backend and frontend use bridge network with exposed ports
+# - Data is shared via Docker volumes between arpwatch and backend
