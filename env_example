@@ -1,0 +1,98 @@
+# ARPWatch-WEBUI Configuration
+# Copy this file to .env and customize for your environment
+# Usage: cp env_example .env && nano .env
+
+###############################################################################
+# REQUIRED: Network Interface Configuration
+###############################################################################
+
+# Network interface to monitor (REQUIRED)
+# Find your interface with: ip link show
+# Common examples: eth0, ens18, enp0s3, wlan0
+ARPWATCH_INTERFACE=eth0
+
+###############################################################################
+# TLS/SSL Configuration
+###############################################################################
+
+# HTTP port (redirects to HTTPS)
+HTTP_PORT=80
+
+# HTTPS port
+HTTPS_PORT=443
+
+# Domain for self-signed certificate (optional, used when generating self-signed cert)
+SSL_DOMAIN=localhost
+
+# Use custom CA certificates (set to true if using certificates from your organization's CA)
+# When true, place cert.pem and key.pem in nginx/ssl/
+CUSTOM_CA=false
+
+###############################################################################
+# Backend Configuration
+###############################################################################
+
+# Enable OS fingerprinting using nmap (requires nmap in container)
+# Set to false to disable OS detection
+ENABLE_OS_FINGERPRINTING=true
+
+# Enable port scanning using nmap
+# Set to false to disable port scanning functionality
+ENABLE_PORT_SCANNING=true
+
+# Ports to scan (comma-separated, no spaces)
+# Common ports: 21,22,23,25,53,80,110,143,443,445,993,995
+SCAN_PORTS=21,22,80,443,445
+
+# IP ranges to exclude from monitoring (CIDR notation, comma-separated)
+# Default: excludes link-local addresses (169.254.0.0/16) which are auto-assigned
+# Example: EXCLUDE_IP_RANGES=169.254.0.0/16,192.168.2.0/24,10.0.0.0/8
+EXCLUDE_IP_RANGES=169.254.0.0/16
+
+# Backend API port (only used if exposing backend directly, not via nginx)
+# Note: With nginx, backend is accessed via /api through HTTPS
+BACKEND_PORT=8000
+
+###############################################################################
+# Frontend Configuration
+###############################################################################
+
+# Frontend web UI port (only used if exposing frontend directly, not via nginx)
+# Note: With nginx, frontend is accessed via HTTPS on port 443
+FRONTEND_PORT=8080
+
+###############################################################################
+# Advanced Configuration (Optional)
+###############################################################################
+
+# OS fingerprinting timeout in seconds (default: 10)
+# Increase if you have slow network responses
+OS_FINGERPRINT_TIMEOUT=10
+
+# OS fingerprint retry window in hours (default: 0, set to 24 or higher to enable retries)
+# Hosts with "Unknown" OS will be retried after this many hours
+# Set to 0 to disable retries
+OS_FINGERPRINT_RETRY_HOURS=0
+
+###############################################################################
+# Notes
+###############################################################################
+
+# 1. After copying this file to .env, configure at minimum:
+#    - ARPWATCH_INTERFACE (required)
+#
+# 2. For TLS/SSL setup:
+#    - Self-signed: ./nginx/generate-self-signed-cert.sh
+#    - Let's Encrypt: ./nginx/setup-letsencrypt.sh domain.com email@example.com
+#    - Custom CA: ./nginx/use-custom-cert.sh /path/to/cert.pem /path/to/key.pem
+#                 Then set CUSTOM_CA=true
+#
+# 3. Access the application:
+#    - With nginx (default): https://localhost or https://your-domain.com
+#    - Direct backend: http://localhost:8000
+#    - Direct frontend: http://localhost:8080
+#
+# 4. Security:
+#    - Never commit .env file to version control
+#    - Never commit nginx/ssl/*.pem files (certificates and keys)
+#    - Add .env and nginx/ssl/ to .gitignore
