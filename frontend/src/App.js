@@ -539,7 +539,25 @@ function App() {
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis type="number" />
                       <YAxis dataKey="name" type="category" width={100} />
-                      <Tooltip />
+                      <Tooltip 
+                        contentStyle={{ 
+                          backgroundColor: 'transparent', 
+                          border: 'none',
+                          boxShadow: 'none',
+                          padding: '4px 8px'
+                        }}
+                        wrapperStyle={{ outline: 'none' }}
+                        labelStyle={{ display: 'none' }}
+                        itemStyle={{ 
+                          color: '#e5e5e5',
+                          padding: '0',
+                          margin: '0',
+                          backgroundColor: 'transparent'
+                        }}
+                        formatter={(value, name) => [value, '']}
+                        separator=""
+                        cursor={{ fill: 'transparent' }}
+                      />
                       <Bar 
                         dataKey="value" 
                         fill="#667eea" 
@@ -588,7 +606,26 @@ function App() {
                           />
                         ))}
                       </Pie>
-                      <Tooltip />
+                      <Tooltip 
+                        contentStyle={{ 
+                          backgroundColor: 'transparent', 
+                          border: 'none',
+                          boxShadow: 'none',
+                          padding: '4px 8px'
+                        }}
+                        wrapperStyle={{ outline: 'none' }}
+                        labelStyle={{ display: 'none' }}
+                        itemStyle={{ 
+                          color: '#e5e5e5',
+                          padding: '0',
+                          margin: '0',
+                          backgroundColor: 'transparent'
+                        }}
+                        formatter={(value, name) => [value, '']}
+                        separator=""
+                        cursor={{ fill: 'transparent' }}
+                        separator=""
+                      />
                       <Legend />
                     </PieChart>
                   )}
@@ -850,16 +887,39 @@ function App() {
                   onChange={async (e) => {
                     const file = e.target.files[0];
                     if (!file) return;
+                    
+                    setFingerprintError(null);
+                    setFingerprintSuccess(null);
+                    
                     try {
                       const formData = new FormData();
                       formData.append('file', file);
                       const res = await axios.post(`${API_URL}/api/fingerprints/import`, formData, {
                         headers: { 'Content-Type': 'multipart/form-data' }
                       });
-                      setFingerprintSuccess(`${res.data.message}`);
-                      fetchFingerprints();
-                      fetchData();
-                      setTimeout(() => setFingerprintSuccess(null), 5000);
+                      
+                      // Build detailed success message
+                      const { merged = 0, skipped = 0, errors = 0 } = res.data;
+                      let successMsg = `Import complete! `;
+                      const parts = [];
+                      if (merged > 0) parts.push(`${merged} imported`);
+                      if (skipped > 0) parts.push(`${skipped} skipped`);
+                      if (errors > 0) parts.push(`${errors} errors`);
+                      
+                      if (parts.length > 0) {
+                        successMsg += parts.join(', ');
+                      } else {
+                        successMsg = 'Import complete, but no records were processed';
+                      }
+                      
+                      setFingerprintSuccess(successMsg);
+                      
+                      // Refresh fingerprint list and main data
+                      await fetchFingerprints();
+                      await fetchData();
+                      
+                      // Clear success message after 7 seconds (longer for detailed message)
+                      setTimeout(() => setFingerprintSuccess(null), 7000);
                       e.target.value = ''; // Reset file input
                     } catch (err) {
                       setFingerprintError(err?.response?.data?.detail || err.message || 'Failed to import fingerprints');
@@ -1035,7 +1095,7 @@ function App() {
       </div>
 
       <footer className="app-footer">
-        <p>Arpwatch Web UI v0.3.1 | Network Monitoring Dashboard</p>
+        <p>Arpwatch Web UI v0.4.0 | Network Monitoring Dashboard</p>
       </footer>
     </div>
   );

@@ -46,6 +46,7 @@
 /* Remove hover effects on chart bars */
 .recharts-bar-rectangle:hover {
   opacity: 1 !important;
+  fill-opacity: 1 !important;
 }
 
 .recharts-bar-rectangle {
@@ -54,6 +55,33 @@
 
 .recharts-active-bar {
   opacity: 1 !important;
+  fill-opacity: 1 !important;
+}
+
+/* Remove bright backgrounds on hover for tooltips and active states */
+.recharts-tooltip-wrapper {
+  background: transparent !important;
+}
+
+.recharts-tooltip-wrapper .recharts-default-tooltip {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+.recharts-active-bar {
+  filter: none !important;
+  opacity: 1 !important;
+}
+
+.recharts-bar .recharts-active-bar {
+  background: transparent !important;
+}
+
+/* Ensure tooltip content has no background */
+.recharts-tooltip-item,
+.recharts-tooltip-item-list {
+  background: transparent !important;
 }
 
 .app-header {
@@ -292,6 +320,16 @@
   border-radius: 12px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
   width: 100%;
+  transition: none !important;
+}
+
+/* Prevent white background on hover - only show tooltip value */
+.recharts-tooltip-wrapper {
+  pointer-events: none;
+}
+
+.recharts-bar-rectangle:hover {
+  opacity: 0.9 !important;
 }
 
 .os-chart-card h3 {
@@ -1112,6 +1150,34 @@ body.dark-theme .event-item {
 
 body.dark-theme .event-item:hover {
   background: #3a3a3a;
+}
+
+body.dark-theme .event-card {
+  background: #2d2d2d !important;
+  border-left: 4px solid #667eea;
+  color: #e5e5e5;
+}
+
+body.dark-theme .event-card:hover {
+  background: #3a3a3a !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+body.dark-theme .event-info {
+  color: #e5e5e5 !important;
+}
+
+body.dark-theme .event-time {
+  color: #9ca3af !important;
+}
+
+body.dark-theme .event-message {
+  background: #1f1f1f !important;
+  color: #b0b0b0 !important;
+}
+
+body.dark-theme .event-info strong {
+  color: #818cf8 !important;
 }
 
 body.dark-theme .loading {

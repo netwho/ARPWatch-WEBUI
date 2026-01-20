@@ -16,7 +16,7 @@ import sys
 from collections import deque
 from datetime import datetime
 
-app = FastAPI(title="Arpwatch API", version="0.3.1")
+app = FastAPI(title="Arpwatch API", version="0.4.0")
 
 # In-memory log buffer to capture application logs
 LOG_BUFFER = deque(maxlen=500)  # Keep last 500 log entries
@@ -67,8 +67,9 @@ async def log_requests(request, call_next):
 ARPWATCH_DATA_DIR = os.getenv("ARPWATCH_DATA_DIR", "/var/lib/arpwatch")
 ARPWATCH_LOG_DIR = os.getenv("ARPWATCH_LOG_DIR", "/var/log/arpwatch")
 ARP_DAT_FILE = os.path.join(ARPWATCH_DATA_DIR, "arp.dat")
-OS_CACHE_FILE = os.path.join(ARPWATCH_DATA_DIR, "os_fingerprint_cache.json")
-DNS_CACHE_FILE = os.path.join(ARPWATCH_DATA_DIR, "dns_hostname_cache.json")
+# Use /tmp for cache files since data directory may be read-only
+OS_CACHE_FILE = os.getenv("OS_CACHE_FILE", os.path.join("/tmp", "os_fingerprint_cache.json"))
+DNS_CACHE_FILE = os.getenv("DNS_CACHE_FILE", os.path.join("/tmp", "dns_hostname_cache.json"))
 
 # Feature flags
 ENABLE_OS_FINGERPRINTING = os.getenv("ENABLE_OS_FINGERPRINTING", "true").lower() == "true"
@@ -86,7 +87,8 @@ OS_FINGERPRINT_TIMEOUT = int(os.getenv("OS_FINGERPRINT_TIMEOUT", "10"))
 rescan_in_progress = False
 
 # IP range exclusion (comma-separated CIDR notation, e.g., "192.168.2.0/24,10.0.0.0/8")
-EXCLUDE_IP_RANGES_STR = os.getenv("EXCLUDE_IP_RANGES", "")
+# Default: exclude link-local addresses (169.254.0.0/16) which are auto-assigned and often stale
+EXCLUDE_IP_RANGES_STR = os.getenv("EXCLUDE_IP_RANGES", "169.254.0.0/16")
 EXCLUDE_IP_RANGES = [r.strip() for r in EXCLUDE_IP_RANGES_STR.split(",") if r.strip()] if EXCLUDE_IP_RANGES_STR else []
 
 def ip_in_range(ip: str, cidr: str) -> bool:
@@ -406,12 +408,42 @@ def rescan_os_fingerprints():
     """Trigger OS fingerprinting for all known hosts in the background."""
     global rescan_in_progress
     if rescan_in_progress:
+        print("Rescan already in progress, skipping...")
         return
     rescan_in_progress = True
     try:
+        print("Starting OS fingerprint rescan...")
         entries = parse_arp_dat()
+        
+        # If arp.dat is empty, try to get hosts from log events
+        if not entries:
+            print("arp.dat is empty, extracting hosts from log events...")
+            try:
+                events = parse_log_files()
+                # Build IP set from events
+                ip_set = set()
+                for event in events:
+                    ip = event.get("ip_address")
+                    if ip and ip != "unknown":
+                        ip_set.add(ip)
+                
+                if ip_set:
+                    print(f"Found {len(ip_set)} unique IPs from log events")
+                    for ip in ip_set:
+                        entries[ip] = {"ip_address": ip}  # Minimal entry for rescan
+            except Exception as e:
+                print(f"Error extracting hosts from logs: {e}")
+        
+        if not entries:
+            print("No hosts found to rescan (arp.dat empty and no log events)")
+            return
+        
+        print(f"Rescanning OS fingerprints for {len(entries)} hosts...")
+        scanned = 0
+        skipped = 0
         for ip in entries.keys():
             if should_exclude_ip(ip):
+                skipped += 1
                 continue
             
             # Check if there's an existing fingerprint before rescanning
@@ -422,13 +454,26 @@ def rescan_os_fingerprints():
             # Skip if there's a manual fingerprint (never overwrite manual)
             if is_manual:
                 print(f"Skipping rescan for {ip}: manual fingerprint exists ({existing_os})")
+                skipped += 1
                 continue
             
-            # Only rescan if no fingerprint exists or if we want to retry Unknown
-            # The os_fingerprint function will handle preserving existing fingerprints
-            os_fingerprint(ip, force=True)
+            # Rescan with force=True to overwrite existing non-manual fingerprints
+            print(f"Rescanning OS for {ip}...")
+            os_result = os_fingerprint(ip, force=True)
+            scanned += 1
+            if os_result:
+                print(f"  → {ip}: {os_result}")
+            else:
+                print(f"  → {ip}: Unknown")
+        
+        print(f"Rescan complete: {scanned} scanned, {skipped} skipped")
+    except Exception as e:
+        print(f"Error during rescan: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         rescan_in_progress = False
+        print("Rescan finished")
 
 def format_age(last_seen_timestamp: Optional[str]) -> Optional[str]:
     """Format age from timestamp to human-readable string"""
@@ -436,22 +481,27 @@ def format_age(last_seen_timestamp: Optional[str]) -> Optional[str]:
         return None
     
     try:
-        # Try to parse various timestamp formats
-        # Arpwatch log format: "Nov 18 10:30:45" or ISO format
-        if 'T' in last_seen_timestamp or '-' in last_seen_timestamp:
-            # ISO format
-            dt = datetime.fromisoformat(last_seen_timestamp.replace('Z', '+00:00'))
-        else:
-            # Try arpwatch format: "Nov 18 10:30:45"
-            try:
-                dt = datetime.strptime(last_seen_timestamp, "%b %d %H:%M:%S")
-                # Assume current year
-                dt = dt.replace(year=datetime.now().year)
-            except:
-                return None
+        # Parse timestamp using helper function
+        dt = parse_timestamp_to_datetime(last_seen_timestamp)
+        if dt is None:
+            return None
         
         now = datetime.now()
         delta = now - dt
+        
+        # Handle negative deltas (future timestamps) - return None for invalid ages
+        if delta.total_seconds() < 0:
+            # If timestamp is in the future, it's likely a parsing error
+            # Try subtracting a year and recalculating
+            dt = dt.replace(year=dt.year - 1)
+            delta = now - dt
+            # If still negative or more than 1 year old, return None
+            if delta.total_seconds() < 0 or delta.total_seconds() > 31536000:
+                return None
+        
+        # Handle very old timestamps (more than 1 year) - likely stale data
+        if delta.total_seconds() > 31536000:  # 1 year
+            return None
         
         if delta.total_seconds() < 60:
             return f"{int(delta.total_seconds())}s"
@@ -477,21 +527,30 @@ def format_age(last_seen_timestamp: Optional[str]) -> Optional[str]:
 def get_inactivity_status(last_seen_timestamp: Optional[str]) -> str:
     """Determine status based on inactivity time (color coding)"""
     if not last_seen_timestamp:
-        return "active-green"  # Default to green if no timestamp
+        return "active-red"  # Default to red if no timestamp (inactive/unknown)
     
     try:
-        # Parse timestamp
-        if 'T' in last_seen_timestamp or '-' in last_seen_timestamp:
-            dt = datetime.fromisoformat(last_seen_timestamp.replace('Z', '+00:00'))
-        else:
-            try:
-                dt = datetime.strptime(last_seen_timestamp, "%b %d %H:%M:%S")
-                dt = dt.replace(year=datetime.now().year)
-            except:
-                return "active-green"
+        # Parse timestamp using helper function
+        dt = parse_timestamp_to_datetime(last_seen_timestamp)
+        if dt is None:
+            return "active-red"  # Red if we can't parse timestamp
         
         now = datetime.now()
         delta = now - dt
+        
+        # Handle negative deltas (future timestamps) - treat as invalid/inactive
+        if delta.total_seconds() < 0:
+            # If timestamp is in the future, it's likely a parsing error
+            # Try subtracting a year and recalculating
+            dt = dt.replace(year=dt.year - 1)
+            delta = now - dt
+            # If still negative or more than 1 year old, treat as inactive
+            if delta.total_seconds() < 0 or delta.total_seconds() > 31536000:
+                return "active-red"
+        
+        # Handle very old timestamps (more than 1 year) - treat as inactive
+        if delta.total_seconds() > 31536000:  # 1 year
+            return "active-red"
         
         hours_inactive = delta.total_seconds() / 3600
         
@@ -501,8 +560,9 @@ def get_inactivity_status(last_seen_timestamp: Optional[str]) -> str:
             return "active-orange"  # Orange: 6-24 hours
         else:
             return "active-green"  # Green: less than 6 hours
-    except:
-        return "active-green"
+    except Exception as e:
+        print(f"Error calculating inactivity status: {e}")
+        return "active-red"  # Default to red on error (inactive)
 
 def scan_ports(ip_address: str, ports: Optional[List[int]] = None) -> PortScanResult:
     """Scan common ports on a host using nmap"""
@@ -634,6 +694,8 @@ def parse_arp_dat():
     entries = {}
     
     if not os.path.exists(ARP_DAT_FILE):
+        # File doesn't exist yet - arpwatch might not have created it
+        # This is normal when arpwatch first starts
         return entries
     
     # Check file size to prevent reading very large files
@@ -758,6 +820,13 @@ def parse_log_files():
         ]
         if log_files:
             print(f"Found {len(log_files)} log file(s) in {ARPWATCH_LOG_DIR}")
+            # Check file sizes
+            for log_file in log_files:
+                try:
+                    size = os.path.getsize(log_file)
+                    print(f"  {os.path.basename(log_file)}: {size} bytes")
+                except:
+                    pass
         else:
             print(f"No .log files found in {ARPWATCH_LOG_DIR}")
     except Exception as e:
@@ -784,38 +853,105 @@ def parse_log_files():
             # Read only last 1000 lines to prevent memory issues
             try:
                 with open(log_file, 'r', errors='ignore') as f:
-                    lines = f.readlines()
-                    # Only process last 1000 lines
+                    content = f.read()
+                    # Try to parse email format first (arpwatch outputs email-style messages)
+                    # Email format: "From: arpwatch ... Subject: new station ... ip address: ..."
+                    email_blocks = re.split(r'\n\n(?=From:|\Z)', content)
+                    for block in email_blocks:
+                        if 'arpwatch' not in block.lower() or 'Subject:' not in block:
+                            continue
+                        
+                        # Extract subject to determine event type
+                        subject_match = re.search(r'Subject:\s*([^\n]+)', block, re.IGNORECASE)
+                        subject = subject_match.group(1).strip() if subject_match else ""
+                        
+                        # Extract IP address
+                        ip_match = re.search(r'ip address:\s*(\d+\.\d+\.\d+\.\d+)', block, re.IGNORECASE)
+                        ip = ip_match.group(1) if ip_match else None
+                        
+                        # Extract MAC address
+                        mac_match = re.search(r'ethernet address:\s*([0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2})', block, re.IGNORECASE)
+                        mac = mac_match.group(1) if mac_match else None
+                        
+                        # Extract timestamp
+                        timestamp_match = re.search(r'timestamp:\s*([^\n]+)', block, re.IGNORECASE)
+                        timestamp = timestamp_match.group(1).strip() if timestamp_match else ""
+                        
+                        # Determine event type from subject
+                        event_type = "info"
+                        if "new station" in subject.lower():
+                            event_type = "new"
+                        elif "changed ethernet" in subject.lower():
+                            event_type = "changed"
+                        elif "flip flop" in subject.lower():
+                            event_type = "flip-flop"
+                        
+                        if ip and mac:
+                            events.append({
+                                "timestamp": timestamp,
+                                "event_type": event_type,
+                                "ip_address": ip,
+                                "mac_address": mac,
+                                "message": subject
+                            })
+                    
+                    # Also parse syslog format (rsyslog output)
+                    lines = content.split('\n')
                     lines = lines[-1000:] if len(lines) > 1000 else lines
                     for line in lines:
-                        # Parse arpwatch log entries
-                        # Format: timestamp hostname arpwatch: message
-                        if 'arpwatch' in line.lower():
+                        # Skip sendmail errors
+                        if 'sendmail' in line.lower() or 'execl' in line.lower() or 'reaper' in line.lower():
+                            continue
+                        
+                        # Parse arpwatch log entries in syslog format
+                        # Format: Jan 19 08:35:49 openvas arpwatch: new station 172.28.184.45 00:a0:c9:8c:a7:9b ens18
+                        if 'arpwatch' in line.lower() and 'Subject:' not in line:
                             # Try to extract timestamp, IP, MAC, and event type
                             match = re.search(r'(\w+\s+\d+\s+\d+:\d+:\d+).*?arpwatch[:\s]+(.*)', line, re.IGNORECASE)
                             if match:
                                 timestamp = match.group(1)
-                                message = match.group(2)
+                                message = match.group(2).strip()
                                 
-                                # Extract IP and MAC from message
-                                ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', message)
-                                mac_match = re.search(r'([0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2})', message, re.IGNORECASE)
-                                
+                                # Parse format: "new station IP MAC interface" or "changed ethernet ..." etc.
                                 event_type = "info"
+                                ip = None
+                                mac = None
+                                
                                 if "new station" in message.lower():
                                     event_type = "new"
+                                    # Extract: "new station IP MAC interface"
+                                    parts = message.split()
+                                    if len(parts) >= 4:
+                                        ip = parts[2] if is_ip_address(parts[2]) else None
+                                        mac = parts[3] if is_mac_address(parts[3]) else None
                                 elif "changed ethernet" in message.lower():
                                     event_type = "changed"
+                                    # Extract IP and MAC from message
+                                    ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', message)
+                                    mac_match = re.search(r'([0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2})', message, re.IGNORECASE)
+                                    ip = ip_match.group(1) if ip_match else None
+                                    mac = mac_match.group(1) if mac_match else None
                                 elif "flip flop" in message.lower():
                                     event_type = "flip-flop"
+                                    ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', message)
+                                    mac_match = re.search(r'([0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2})', message, re.IGNORECASE)
+                                    ip = ip_match.group(1) if ip_match else None
+                                    mac = mac_match.group(1) if mac_match else None
+                                else:
+                                    # Try to extract IP and MAC from any arpwatch message
+                                    ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', message)
+                                    mac_match = re.search(r'([0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2})', message, re.IGNORECASE)
+                                    ip = ip_match.group(1) if ip_match else None
+                                    mac = mac_match.group(1) if mac_match else None
                                 
-                                events.append({
-                                    "timestamp": timestamp,
-                                    "event_type": event_type,
-                                    "ip_address": ip_match.group(1) if ip_match else "unknown",
-                                    "mac_address": mac_match.group(1) if mac_match else "unknown",
-                                    "message": message
-                                })
+                                if ip and mac:
+                                    events.append({
+                                        "timestamp": timestamp,
+                                        "event_type": event_type,
+                                        "ip_address": ip,
+                                        "mac_address": mac,
+                                        "message": message
+                                    })
             except Exception as e:
                 print(f"Error reading log file {log_file}: {e}")
                 continue
@@ -855,23 +991,32 @@ def get_last_seen_timestamps():
     return last_seen
 
 def parse_timestamp_to_datetime(timestamp_str: Optional[str]) -> Optional[datetime]:
-    """Parse timestamp string to datetime object"""
+    """Parse timestamp string to datetime object with proper year handling"""
     if not timestamp_str:
         return None
     
     try:
         # Try ISO format first
-        if 'T' in timestamp_str or '-' in timestamp_str:
+        if 'T' in timestamp_str or (timestamp_str.count('-') >= 2):
             return datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
         # Try arpwatch format: "Nov 18 10:30:45"
         try:
             dt = datetime.strptime(timestamp_str, "%b %d %H:%M:%S")
-            # Assume current year
-            return dt.replace(year=datetime.now().year)
+            now = datetime.now()
+            # Handle year wrapping: if parsed date is in the future, use previous year
+            dt = dt.replace(year=now.year)
+            # If the date is more than 6 months in the future, it's likely from last year
+            if dt > now and (dt - now).days > 180:
+                dt = dt.replace(year=now.year - 1)
+            return dt
         except:
             # Try Unix timestamp
             if re.match(r'^\d+$', timestamp_str):
-                return datetime.fromtimestamp(int(timestamp_str))
+                ts = int(timestamp_str)
+                # Validate timestamp is reasonable (between 2000-01-01 and 2100-01-01)
+                if ts < 946684800 or ts > 4102444800:  # 2000-01-01 to 2100-01-01
+                    return None
+                return datetime.fromtimestamp(ts)
             return None
     except Exception as e:
         print(f"[ERROR] Error parsing timestamp '{timestamp_str}': {e}")
@@ -991,7 +1136,7 @@ def cleanup_idle_hosts():
 async def root():
     return {
         "message": "Arpwatch API", 
-        "version": "0.3.1",
+        "version": "0.4.0",
         "features": {
             "os_fingerprinting": ENABLE_OS_FINGERPRINTING,
             "port_scanning": ENABLE_PORT_SCANNING,
@@ -1013,6 +1158,43 @@ def get_hosts():
     except Exception as e:
         print(f"Error parsing arp.dat in get_hosts: {e}")
         entries = {}
+    
+    # If arp.dat is empty, try to build entries from log events
+    if not entries:
+        print("[WARNING] arp.dat is empty, attempting to build entries from log events...")
+        try:
+            events = parse_log_files()
+            # Build a map of IP -> entry from events (keep most recent for each IP)
+            event_entries = {}
+            for event in events:
+                ip = event.get("ip_address")
+                mac = event.get("mac_address")
+                timestamp = event.get("timestamp")
+                if ip and ip != "unknown" and mac and mac != "unknown":
+                    # Keep the most recent event for each IP
+                    if ip not in event_entries or timestamp > event_entries[ip].get("file_timestamp", ""):
+                        # Try to extract hostname from message
+                        message = event.get("message", "")
+                        hostname = None
+                        if "(" in message and ")" in message:
+                            # Extract hostname from subject like "new station (hostname.domain) ens18"
+                            hostname_match = re.search(r'\(([^)]+)\)', message)
+                            if hostname_match:
+                                hostname = hostname_match.group(1)
+                        
+                        event_entries[ip] = {
+                            "ip_address": ip,
+                            "mac_address": mac,
+                            "hostname": hostname,
+                            "file_timestamp": timestamp or "",
+                            "vendor": None
+                        }
+            
+            if event_entries:
+                print(f"✓ Built {len(event_entries)} entries from log events")
+                entries = event_entries
+        except Exception as e:
+            print(f"[ERROR] Error building entries from log events: {e}")
     
     try:
         last_seen_map = get_last_seen_timestamps()
@@ -1135,20 +1317,51 @@ def get_stats():
         print(f"Error parsing log files in get_stats: {e}")
         events = []
     
+    # Fallback: if arp.dat is empty, build entries from log events
+    if not entries:
+        print("[INFO] arp.dat is empty in get_stats, building entries from log events.")
+        for event in events:
+            ip = event.get("ip_address")
+            mac = event.get("mac_address")
+            if ip and mac and ip != "unknown" and mac != "unknown":
+                if ip not in entries:
+                    entries[ip] = {
+                        "ip_address": ip,
+                        "mac_address": mac
+                    }
+    
     try:
         last_seen_map = get_last_seen_timestamps()
     except Exception as e:
         print(f"Error getting last seen timestamps in get_stats: {e}")
         last_seen_map = {}
     
-    active_hosts = len(entries)
-    new_hosts = len([e for e in events if e.get("event_type") == "new"])
-    changed_hosts = len([e for e in events if e.get("event_type") == "changed"])
+    # Count active hosts (excluding excluded IP ranges)
+    active_hosts = len([ip for ip in entries.keys() if not should_exclude_ip(ip)])
     
-    # Calculate OS distribution
+    # Count new and changed hosts from events
+    # Count unique IPs with new/changed events (not just event count)
+    new_hosts_set = set()
+    changed_hosts_set = set()
+    
+    for event in events:
+        event_type = event.get("event_type")
+        ip = event.get("ip_address")
+        if ip and ip != "unknown" and not should_exclude_ip(ip):
+            if event_type == "new":
+                new_hosts_set.add(ip)
+            elif event_type == "changed":
+                changed_hosts_set.add(ip)
+    
+    new_hosts = len(new_hosts_set)
+    changed_hosts = len(changed_hosts_set)
+    
+    # Calculate OS distribution (excluding excluded IPs)
     os_distribution = {}
     try:
         for ip in entries.keys():
+            if should_exclude_ip(ip):
+                continue
             try:
                 # Get OS from cache (don't trigger new scans)
                 if ip in os_cache:
@@ -1157,7 +1370,11 @@ def get_stats():
                         # Simplify OS name (e.g., "Linux 3.x" -> "Linux")
                         os_simple = os_info.split()[0] if os_info else "Unknown"
                         os_distribution[os_simple] = os_distribution.get(os_simple, 0) + 1
+                    else:
+                        # OS cache entry exists but no OS info (Unknown)
+                        os_distribution["Unknown"] = os_distribution.get("Unknown", 0) + 1
                 else:
+                    # No OS cache entry (not scanned yet)
                     os_distribution["Unknown"] = os_distribution.get("Unknown", 0) + 1
             except Exception as e:
                 print(f"Error processing OS for {ip} in stats: {e}")
@@ -1586,6 +1803,63 @@ def get_logs():
                 f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Check container logs manually: docker logs arpwatch-backend"
             ]
         }
+
+@app.get("/api/debug/logs")
+def debug_logs():
+    """Debug endpoint to check arpwatch log files and arp.dat"""
+    debug_info = {
+        "log_directory": ARPWATCH_LOG_DIR,
+        "log_directory_exists": os.path.exists(ARPWATCH_LOG_DIR),
+        "data_directory": ARPWATCH_DATA_DIR,
+        "data_directory_exists": os.path.exists(ARPWATCH_DATA_DIR),
+        "arp_dat_exists": os.path.exists(ARP_DAT_FILE),
+        "arp_dat_size": 0,
+        "arp_dat_lines": 0,
+        "log_files": [],
+        "log_file_contents": {},
+        "arp_dat_sample": None
+    }
+    
+    try:
+        # Check log directory
+        if os.path.exists(ARPWATCH_LOG_DIR):
+            log_files = [f for f in os.listdir(ARPWATCH_LOG_DIR) 
+                        if os.path.isfile(os.path.join(ARPWATCH_LOG_DIR, f)) and f.endswith('.log')]
+            debug_info["log_files"] = log_files
+            
+            # Read sample from each log file (last 10 lines)
+            for log_file in log_files:
+                log_path = os.path.join(ARPWATCH_LOG_DIR, log_file)
+                try:
+                    size = os.path.getsize(log_path)
+                    with open(log_path, 'r', errors='ignore') as f:
+                        lines = f.readlines()
+                        debug_info["log_file_contents"][log_file] = {
+                            "size": size,
+                            "total_lines": len(lines),
+                            "last_10_lines": lines[-10:] if len(lines) > 0 else [],
+                            "contains_arpwatch": any('arpwatch' in line.lower() for line in lines[-50:]) if lines else False
+                        }
+                except Exception as e:
+                    debug_info["log_file_contents"][log_file] = {"error": str(e)}
+        
+        # Check arp.dat
+        if os.path.exists(ARP_DAT_FILE):
+            debug_info["arp_dat_size"] = os.path.getsize(ARP_DAT_FILE)
+            try:
+                with open(ARP_DAT_FILE, 'r', errors='ignore') as f:
+                    lines = f.readlines()
+                    debug_info["arp_dat_lines"] = len(lines)
+                    # Get sample (first 10 non-empty lines)
+                    sample_lines = [l.strip() for l in lines if l.strip()][:10]
+                    debug_info["arp_dat_sample"] = sample_lines
+            except Exception as e:
+                debug_info["arp_dat_error"] = str(e)
+        
+    except Exception as e:
+        debug_info["error"] = str(e)
+    
+    return debug_info
 
 if __name__ == "__main__":
     import uvicorn
