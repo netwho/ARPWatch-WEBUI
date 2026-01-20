@@ -1,39 +1,128 @@
+# Docker Compose for ARPWatch-WEBUI using prebuilt images from Docker Hub
+# This file uses prebuilt images - no building required!
+#
+# Quick Start:
+#   1. Find your network interface: ip link show
+#   2. Copy env file: cp env_example .env
+#   3. Edit .env and set: ARPWATCH_INTERFACE=your-interface
+#   4. Start: docker compose up -d
+#
+# Docker Hub images:
+#   - netwho/arpwatch-webui:arpwatch-latest
+#   - netwho/arpwatch-webui:backend-latest
+#   - netwho/arpwatch-webui:frontend-latest
+#   - netwho/arpwatch-webui:nginx-latest
+
 services:
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: arpwatch-backend
-    ports:
-      - "8000:8000"
+  # Arpwatch daemon - monitors network interface
+  arpwatch:
+    image: netwho/arpwatch-webui:arpwatch-latest
+    container_name: arpwatch-daemon
+    network_mode: host  # Direct access to host network interfaces
+    environment:
+      - INTERFACE=${ARPWATCH_INTERFACE:-eth0}
     volumes:
-      - /var/lib/arpwatch:/var/lib/arpwatch:rw  # Changed to rw for OS cache file
-      - /var/log/arpwatch:/var/log/arpwatch:ro
-      - /var/log/syslog:/var/log/syslog:ro  # Expose host syslog so events are parsed
+      - arpwatch-data:/var/lib/arpwatch:rw
+      - arpwatch-logs:/var/log/arpwatch:rw
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    privileged: true  # Required for raw network packet capture
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pgrep", "-x", "arpwatch"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # FastAPI backend - serves API and processes ARP data
+  backend:
+    image: netwho/arpwatch-webui:backend-latest
+    container_name: arpwatch-backend
+    expose:
+      - "8000"
+    # Uncomment to access backend directly (without nginx)
+    # ports:
+    #   - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - arpwatch-data:/var/lib/arpwatch:ro
+      - arpwatch-logs:/var/log/arpwatch:ro
+      - backend-cache:/tmp:rw
     environment:
       - ARPWATCH_DATA_DIR=/var/lib/arpwatch
       - ARPWATCH_LOG_DIR=/var/log/arpwatch
-      - ENABLE_OS_FINGERPRINTING=true
-      - ENABLE_PORT_SCANNING=true
-      - SCAN_PORTS=21,22,80,443,445
-      # EXCLUDE_IP_RANGES: Comma-separated CIDR ranges to exclude (e.g., "192.168.2.0/24" for VPN)
-      # - EXCLUDE_IP_RANGES=192.168.2.0/24
+      - ENABLE_OS_FINGERPRINTING=${ENABLE_OS_FINGERPRINTING:-true}
+      - ENABLE_PORT_SCANNING=${ENABLE_PORT_SCANNING:-true}
+      - SCAN_PORTS=${SCAN_PORTS:-21,22,80,443,445}
+      - EXCLUDE_IP_RANGES=${EXCLUDE_IP_RANGES:-169.254.0.0/16}
     cap_add:
-      - NET_RAW  # Required for nmap OS detection
-      - NET_ADMIN  # May be needed for some nmap operations
-    restart: unless-stopped
-
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: arpwatch-frontend
-    ports:
-      - "8080:80"
+      - NET_RAW
+      - NET_ADMIN
     depends_on:
+      arpwatch:
+        condition: service_started
+        required: false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # React frontend - web UI dashboard
+  frontend:
+    image: netwho/arpwatch-webui:frontend-latest
+    container_name: arpwatch-frontend
+    expose:
+      - "80"
+    # Uncomment to access frontend directly (without nginx)
+    # ports:
+    #   - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Nginx reverse proxy with TLS support
+  nginx:
+    image: netwho/arpwatch-webui:nginx-latest
+    container_name: arpwatch-nginx
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./nginx/logs:/var/log/nginx
+      - certbot-webroot:/var/www/certbot:ro
+    environment:
+      - CUSTOM_CA=${CUSTOM_CA:-false}
+    depends_on:
+      - frontend
       - backend
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-# Note: Arpwatch runs natively on the host
-# Data files are mounted from /var/lib/arpwatch and /var/log/arpwatch
-
+volumes:
+  arpwatch-data:
+    driver: local
+    name: arpwatch-data
+  arpwatch-logs:
+    driver: local
+    name: arpwatch-logs
+  backend-cache:
+    driver: local
+    name: backend-cache
+  certbot-webroot:
+    driver: local
+    name: certbot-webroot
