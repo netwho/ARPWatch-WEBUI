@@ -48,7 +48,7 @@ def main():
         print("Password/PAT is required")
         sys.exit(1)
 
-    version = input("Version tag [0.4.1]: ").strip() or "0.4.1"
+    version = input("Version tag [0.4.0]: ").strip() or "0.4.0"
     repo = input("Repository [netwho/arpwatch-webui]: ").strip() or "netwho/arpwatch-webui"
     platforms = input("Platforms (comma-separated) [linux/amd64,linux/arm64]: ").strip() or "linux/amd64,linux/arm64"
 

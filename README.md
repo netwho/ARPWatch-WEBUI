@@ -30,6 +30,51 @@ A modern, containerized web interface for monitoring Arpwatch network activity. 
 
 Get up and running in 5 minutes with prebuilt Docker images!
 
+### ⚡ Easiest Way: Use the Quick Setup Script
+
+The **easiest and most convenient** way to get ARPWatch-WEBUI up and running is using the interactive `quick_setup.py` script. It handles everything for you:
+
+**One-command installation:**
+```bash
+# Download and run the quick setup script
+wget -O quick_setup.py https://raw.githubusercontent.com/netwho/ARPWatch-WEBUI/main/quick_setup.py
+python3 quick_setup.py
+```
+
+**What the script does:**
+- ✅ Automatically detects and lists available network interfaces
+- ✅ Lets you interactively select which interface to monitor
+- ✅ Suggests available ports and checks for conflicts
+- ✅ Optionally generates self-signed SSL certificates
+- ✅ Creates a ready-to-use `.env` configuration file
+- ✅ Generates `docker-compose.yml` with prebuilt images
+- ✅ Sets up directory structure and SSL certificates directory
+- ✅ Provides clear next steps
+
+**After running the script:**
+```bash
+# The script creates everything you need. Just start the services:
+docker compose up -d
+
+# Check status
+docker compose ps
+
+# View logs
+docker compose logs -f
+```
+
+**Access your dashboard:**
+- With nginx (HTTPS): `https://localhost` or `https://your-server-ip`
+- Direct access (HTTP): `http://localhost:8080` (frontend) and `http://localhost:8000` (API)
+
+That's it! The script handles all the configuration, so you can skip to the "Usage" section below once your containers are running.
+
+---
+
+### Manual Installation (Alternative)
+
+If you prefer manual setup or want more control, follow these steps:
+
 ### Prerequisites
 
 - Docker and Docker Compose installed

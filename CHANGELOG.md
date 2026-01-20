@@ -5,19 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.1] - 2026-01-19
-
-### Fixed
-- Fixed fingerprint import functionality to work with empty arp.dat by building entries from log events
-- Fixed fingerprint endpoints (unknown/all) to show correct count when arp.dat is empty
-- Improved MAC address matching in import with normalization (handles colons/dashes)
-- Added detailed import confirmation message with counts (imported/skipped/errors)
-- Added automatic page refresh after fingerprint import
-
-### Added
-- Enhanced import logging for debugging MAC/IP matching
-- Better error handling in fingerprint import with detailed feedback
-
 ## [0.4.0] - 2025-12-18
 
 ### Changed
