@@ -16,7 +16,7 @@ import sys
 from collections import deque
 from datetime import datetime
 
-app = FastAPI(title="Arpwatch API", version="0.4.0")
+app = FastAPI(title="Arpwatch API", version="0.4.1")
 
 # In-memory log buffer to capture application logs
 LOG_BUFFER = deque(maxlen=500)  # Keep last 500 log entries
@@ -1136,7 +1136,7 @@ def cleanup_idle_hosts():
 async def root():
     return {
         "message": "Arpwatch API", 
-        "version": "0.4.0",
+        "version": "0.4.1",
         "features": {
             "os_fingerprinting": ENABLE_OS_FINGERPRINTING,
             "port_scanning": ENABLE_PORT_SCANNING,
@@ -1424,6 +1424,25 @@ def scan_host_ports(ip_address: str):
 def get_unknown_fingerprints():
     """Return hosts whose OS fingerprint is unknown (cached-only, no scans)."""
     entries = parse_arp_dat()
+    
+    # Fallback: if arp.dat is empty, build entries from log events
+    if not entries:
+        print("[INFO] arp.dat is empty in get_unknown_fingerprints, building entries from log events.")
+        try:
+            events = parse_log_files()
+            for event in events:
+                ip = event.get("ip_address")
+                mac = event.get("mac_address")
+                if ip and mac and ip != "unknown" and mac != "unknown":
+                    if ip not in entries:
+                        entries[ip] = {
+                            "ip_address": ip,
+                            "mac_address": mac,
+                            "hostname": None
+                        }
+        except Exception as e:
+            print(f"[ERROR] Error building entries from logs in get_unknown_fingerprints: {e}")
+    
     last_seen_map = get_last_seen_timestamps()
     result = []
     for ip, entry in entries.items():
@@ -1498,6 +1517,25 @@ def os_rescan_status():
 def get_all_fingerprints():
     """Get all fingerprints (both manual and auto-detected)"""
     entries = parse_arp_dat()
+    
+    # Fallback: if arp.dat is empty, build entries from log events
+    if not entries:
+        print("[INFO] arp.dat is empty in get_all_fingerprints, building entries from log events.")
+        try:
+            events = parse_log_files()
+            for event in events:
+                ip = event.get("ip_address")
+                mac = event.get("mac_address")
+                if ip and mac and ip != "unknown" and mac != "unknown":
+                    if ip not in entries:
+                        entries[ip] = {
+                            "ip_address": ip,
+                            "mac_address": mac,
+                            "hostname": None
+                        }
+        except Exception as e:
+            print(f"[ERROR] Error building entries from logs in get_all_fingerprints: {e}")
+    
     last_seen_map = get_last_seen_timestamps()
     result = []
     for ip, entry in entries.items():
@@ -1581,31 +1619,61 @@ async def import_fingerprints(file: UploadFile = File(...)):
     
     # Load current entries to map MAC to IP
     entries = parse_arp_dat()
+    
+    # Fallback: if arp.dat is empty, build entries from log events
+    if not entries:
+        print("[INFO] arp.dat is empty in import_fingerprints, building entries from log events.")
+        try:
+            events = parse_log_files()
+            for event in events:
+                ip = event.get("ip_address")
+                mac = event.get("mac_address")
+                if ip and mac and ip != "unknown" and mac != "unknown":
+                    if ip not in entries:
+                        entries[ip] = {
+                            "ip_address": ip,
+                            "mac_address": mac,
+                            "hostname": None
+                        }
+        except Exception as e:
+            print(f"[ERROR] Error building entries from logs in import_fingerprints: {e}")
+    
     mac_to_ip = {}
     for ip, entry in entries.items():
         mac = entry.get("mac_address")
         if mac:
-            mac_to_ip[mac.lower()] = ip
+            # Normalize MAC address (remove colons/dashes, convert to lowercase)
+            mac_normalized = mac.lower().replace(':', '').replace('-', '')
+            mac_to_ip[mac_normalized] = ip
+    
+    print(f"[INFO] Built MAC-to-IP map with {len(mac_to_ip)} entries for import matching")
     
     for fp in imported:
         try:
-            mac = fp.get("mac_address", "").lower()
+            mac_raw = fp.get("mac_address", "")
             ip = fp.get("ip_address", "")
             os_value = fp.get("os_fingerprint", "").strip()
             
             if not os_value:
                 skipped_count += 1
+                print(f"[INFO] Skipping fingerprint - no OS value for MAC {mac_raw} IP {ip}")
                 continue
+            
+            # Normalize MAC address for matching
+            mac_normalized = mac_raw.lower().replace(':', '').replace('-', '') if mac_raw else ""
             
             # Prefer MAC address for matching, fallback to IP
             target_ip = None
-            if mac and mac in mac_to_ip:
-                target_ip = mac_to_ip[mac]
+            if mac_normalized and mac_normalized in mac_to_ip:
+                target_ip = mac_to_ip[mac_normalized]
+                print(f"[INFO] Matched import MAC {mac_raw} to IP {target_ip}")
             elif ip and is_ip_address(ip) and ip in entries:
                 target_ip = ip
+                print(f"[INFO] Matched import IP {ip} directly")
             else:
                 # If neither MAC nor IP matches, skip
                 skipped_count += 1
+                print(f"[WARNING] Skipping import - no match for MAC {mac_raw} or IP {ip}")
                 continue
             
             # Merge fingerprint (overwrite existing)
