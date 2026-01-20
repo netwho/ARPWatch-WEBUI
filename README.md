@@ -5,6 +5,17 @@
 [![Docker](https://img.shields.io/badge/Docker-20.10%2B-2496ED.svg?logo=docker)](https://www.docker.com/)
 [![Docker Hub](https://img.shields.io/badge/Docker%20Hub-netwho%2Farpwatch--webui-blue.svg?logo=docker)](https://hub.docker.com/r/netwho/arpwatch-webui)
 
+> 🚀 Easiest path (skip the rest if you just want it running):
+> 1) Download the helper:  
+>    `wget -O quick_setup.py https://raw.githubusercontent.com/netwho/ARPWatch-WEBUI/main/quick_setup.py`
+> 2) Run it and answer the prompts (interface, ports, TLS/with or without nginx):  
+>    `python3 quick_setup.py`
+> 3) The script writes `.env`, `docker-compose.yml`, and (optionally) a self‑signed cert, then drops you into the target folder. Start it:  
+>    `docker compose up -d`
+> 4) Check status/logs:  
+>    `docker compose ps`  
+>    `docker compose logs -f nginx backend frontend arpwatch`
+
 **Author:** Walter Hofstetter  
 **License:** GPLv2 (see `LICENSE`)
 
